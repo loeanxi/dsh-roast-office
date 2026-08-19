@@ -785,7 +785,7 @@ export function apply(ctx: Context, rawConfig: Config): void {
         const scope = invocation.rawInput.trim() === 'session' || invocation.rawInput.trim() === 'selection'
           ? invocation.rawInput.trim() as ReviewScope
           : 'turn'
-        const state = states.get(invocation.agent)
+        const state = states.get(invocation.agent) ?? restoreStateFromSession(states, invocation.agent, config)
         const snapshot = state !== undefined && state.calls > 0
           ? { report: reportFromState(state), observations: state.observations.slice(-config.maxReviewObservations) }
           : lastReviews.get(invocation.agent)
@@ -813,7 +813,7 @@ export function apply(ctx: Context, rawConfig: Config): void {
   })
 
   ctx.on('roast-office/request-review', ({ agent, scope }) => {
-    const state = states.get(agent)
+    const state = states.get(agent) ?? restoreStateFromSession(states, agent, config)
     if (state !== undefined && state.calls > 0) {
       emitReviewSnapshot(ctx, agent, {
         report: reportFromState(state),
