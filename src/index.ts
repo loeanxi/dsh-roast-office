@@ -134,6 +134,25 @@ export interface IndependentReviewer {
   review(request: IndependentReviewInput, parent?: Agent): Promise<ReviewConclusion>
 }
 
+function reviewCommandText(request: ReviewRequest, result: ReviewResult): string {
+  return `ROAST_OFFICE_REVIEW:${JSON.stringify({
+    request: { requestId: request.requestId, scope: request.scope, report: request.report },
+    result: { ...result, agent: undefined },
+  })}`
+}
+
+function appendWebReviewCard(request: ReviewRequest, result: ReviewResult): void {
+  const session = (request.agent as unknown as { session?: { append(type: string, data: unknown): unknown } }).session
+  if (session === undefined) return
+  const commandId = `roast-office-${request.requestId}`
+  try {
+    session.append('command/run', { commandId, name: 'review', args: request.scope, source: { kind: 'user' } })
+    session.append('command/done', { commandId, kind: 'success', text: reviewCommandText(request, result) })
+  } catch {
+    // A non-dsh host may expose a session-like object without command events.
+  }
+}
+
 interface SubagentResultLike {
   readonly structured?: unknown
   readonly output: readonly unknown[]
@@ -441,7 +460,7 @@ export function installIndependentReviewer(ctx: Context, reviewer: IndependentRe
   return ctx.on('roast-office/review-request', request => {
     const { agent: _executionAgent, ...reviewInput } = request
     void Promise.resolve().then(() => reviewer.review(reviewInput, request.agent)).then(result => {
-      ctx.emit(ctx as never, 'roast-office/review-result', {
+      const reviewResult: ReviewResult = {
         requestId: request.requestId,
         agent: request.agent,
         status: 'completed',
@@ -452,9 +471,11 @@ export function installIndependentReviewer(ctx: Context, reviewer: IndependentRe
         needsSecondReview: result.needsSecondReview,
         consensus: 'single',
         reviewer: 'independent-agent',
-      })
+      }
+      ctx.emit(ctx as never, 'roast-office/review-result', reviewResult)
+      if (request.trigger !== 'manual') appendWebReviewCard(request, reviewResult)
     }).catch(error => {
-      ctx.emit(ctx as never, 'roast-office/review-result', {
+      const reviewResult: ReviewResult = {
         requestId: request.requestId,
         agent: request.agent,
         status: 'failed',
@@ -466,7 +487,9 @@ export function installIndependentReviewer(ctx: Context, reviewer: IndependentRe
         consensus: 'single',
         reviewer: 'independent-agent',
         error: error instanceof Error ? error.message : String(error),
-      })
+      }
+      ctx.emit(ctx as never, 'roast-office/review-result', reviewResult)
+      if (request.trigger !== 'manual') appendWebReviewCard(request, reviewResult)
     })
   })
 }
