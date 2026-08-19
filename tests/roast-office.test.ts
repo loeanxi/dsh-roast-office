@@ -47,6 +47,7 @@ describe('dsh-roast-office', () => {
         closure: 80,
       },
       efficiencyStatus: 'normal',
+      trend: 'first-turn',
       score: 82,
       risk: 'medium',
       verdict: 'review',
@@ -127,6 +128,7 @@ describe('dsh-roast-office', () => {
         closure: 100,
       },
       efficiencyStatus: 'normal',
+      trend: 'first-turn',
       score: 100,
       risk: 'low',
       verdict: 'excellent',
@@ -154,6 +156,7 @@ describe('dsh-roast-office', () => {
         completeness: 80,
       },
       efficiencyStatus: 'normal',
+      trend: 'first-turn',
       score: 93,
       risk: 'low',
       verdict: 'excellent',
@@ -182,6 +185,7 @@ describe('dsh-roast-office', () => {
         completeness: 100,
       },
       efficiencyStatus: 'normal',
+      trend: 'first-turn',
       score: 100,
       verdict: 'excellent',
     })
@@ -196,5 +200,18 @@ describe('dsh-roast-office', () => {
     await post(ctx, execution(agent, 'write', { path: 'README.md' }), success())
     ctx.emit(ctx as never, 'agent/status', { agent, status: 'idle' })
     expect(reports[0]).toMatchObject({ mutations: 0, unverifiedChanges: 0, score: 100 })
+  })
+
+  it('reports improvement across consecutive turns', async () => {
+    const ctx = new Context()
+    const reports: RoastOffice.BehaviorReport[] = []
+    ctx.on('roast-office/report', ({ report }) => { reports.push(report) })
+    await ctx.plugin(RoastOffice, { channels: ['context'], reportChannel: 'event' })
+    const agent = {} as Agent
+    await post(ctx, execution(agent, 'write', { path: 'src/index.ts' }), success())
+    ctx.emit(ctx as never, 'agent/status', { agent, status: 'idle' })
+    await post(ctx, execution(agent, 'write', { path: 'README.md' }), success())
+    ctx.emit(ctx as never, 'agent/status', { agent, status: 'idle' })
+    expect(reports.map(report => report.trend)).toEqual(['first-turn', 'improving'])
   })
 })

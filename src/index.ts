@@ -48,6 +48,7 @@ export interface BehaviorBreakdown {
 export interface BehaviorReport extends BehaviorMetrics {
   readonly breakdown: BehaviorBreakdown
   readonly efficiencyStatus: 'normal' | 'watch' | 'stuck'
+  readonly trend: 'first-turn' | 'improving' | 'stable' | 'declining'
   readonly score: number
   readonly risk: 'low' | 'medium' | 'high'
   readonly verdict: 'excellent' | 'review' | 'stalled'
@@ -86,6 +87,8 @@ export interface Config {
   verificationTools?: string[]
   /** Paths whose mutations require a verification run; defaults to source and config paths. */
   verificationPaths?: string[]
+  /** Number of previous turn scores retained for trend comparison. */
+  historySize?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -99,6 +102,7 @@ export const Config: z<Config> = z.object({
   mutationTools: z.array(z.string()).default(['write', 'edit', 'apply_patch', 'str_replace_editor']),
   verificationTools: z.array(z.string()).default(['test', 'lint', 'typecheck', 'build', 'check']),
   verificationPaths: z.array(z.string()).default(['src/**', 'packages/**', 'examples/**', 'scripts/**', '*.config.*', 'package.json', 'tsconfig*.json']),
+  historySize: z.number().default(5),
 })
 
 /** A stable, machine-readable observation produced by a rule. */
@@ -230,7 +234,18 @@ export function buildBehaviorReport(metrics: BehaviorMetrics): BehaviorReport {
   const score = Math.round((breakdown.stability + breakdown.completeness + breakdown.efficiency + breakdown.closure) / 4)
   const risk = score >= 85 ? 'low' : score >= 60 ? 'medium' : 'high'
   const verdict = score >= 85 ? 'excellent' : score >= 60 ? 'review' : 'stalled'
-  return { ...metrics, breakdown, efficiencyStatus, score, risk, verdict }
+  return { ...metrics, breakdown, efficiencyStatus, trend: 'first-turn', score, risk, verdict }
+}
+
+function withTrend(report: BehaviorReport, previousScore: number | undefined): BehaviorReport {
+  const trend = previousScore === undefined
+    ? 'first-turn'
+    : report.score > previousScore
+      ? 'improving'
+      : report.score < previousScore
+        ? 'declining'
+        : 'stable'
+  return { ...report, trend }
 }
 
 function reportText(style: Style, report: BehaviorReport): string {
@@ -238,7 +253,7 @@ function reportText(style: Style, report: BehaviorReport): string {
     + `工具调用：${report.calls} 次；失败：${report.failures} 次；重复事件：${report.repeatIncidents} 次；失败重试：${report.failureIncidents} 次；使用工具：${report.uniqueTools} 种。\n`
     + `工作区改动：${report.mutations} 次；验证运行：${report.verificationRuns} 次；未验证改动：${report.unverifiedChanges} 次。\n`
     + `稳定性：${report.breakdown.stability}；完整性：${report.breakdown.completeness}；效率：${report.breakdown.efficiency}（${report.efficiencyStatus}）；收尾：${report.breakdown.closure}。\n`
-    + `风险等级：${report.risk}。`
+    + `风险等级：${report.risk}；趋势：${report.trend}。`
   if (style === 'neutral') return summary + ' 建议：检查相关测试和工作区后再提交。'
   if (style === 'gentle') return summary + ' 可以再确认一次测试和工作区状态。'
   const joke = report.verdict === 'excellent'
@@ -332,8 +347,10 @@ export function apply(ctx: Context, rawConfig: Config): void {
     mutationTools: rawConfig.mutationTools ?? ['write', 'edit', 'apply_patch', 'str_replace_editor'],
     verificationTools: rawConfig.verificationTools ?? ['test', 'lint', 'typecheck', 'build', 'check'],
     verificationPaths: rawConfig.verificationPaths ?? ['src/**', 'packages/**', 'examples/**', 'scripts/**', '*.config.*', 'package.json', 'tsconfig*.json'],
+    historySize: validatePositiveInteger(rawConfig.historySize ?? 5, 'historySize'),
   }
   const states = new WeakMap<Agent, AgentState>()
+  const history = new WeakMap<Agent, number[]>()
 
   ctx.on('tools/post-execute', async (exec, result, next): Promise<PostToolDecision> => {
     const decision = await next()
@@ -365,10 +382,15 @@ export function apply(ctx: Context, rawConfig: Config): void {
       verificationRuns: state.verificationRuns,
       unverifiedChanges: state.mutations > 0 && !state.verifiedSinceMutation ? 1 : 0,
     })
-    const text = reportText(config.style, report)
+    const scores = history.get(agent) ?? []
+    const reportWithTrend = withTrend(report, scores.at(-1))
+    scores.push(report.score)
+    while (scores.length > config.historySize) scores.shift()
+    history.set(agent, scores)
+    const text = reportText(config.style, reportWithTrend)
     if (config.reportChannel === 'console' || config.reportChannel === 'both') ctx.logger.info(text)
     if (config.reportChannel === 'event' || config.reportChannel === 'both') {
-      ctx.emit(ctx as never, 'roast-office/report', { agent, report, text })
+      ctx.emit(ctx as never, 'roast-office/report', { agent, report: reportWithTrend, text })
     }
     states.delete(agent)
   })
