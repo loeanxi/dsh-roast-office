@@ -36,8 +36,17 @@ export interface BehaviorMetrics {
   readonly unverifiedChanges: number
 }
 
+/** Scores for the independent behavior dimensions shown in a report. */
+export interface BehaviorBreakdown {
+  readonly stability: number
+  readonly completeness: number
+  readonly efficiency: number
+  readonly closure: number
+}
+
 /** Deterministic turn-level behavior report. */
 export interface BehaviorReport extends BehaviorMetrics {
+  readonly breakdown: BehaviorBreakdown
   readonly score: number
   readonly risk: 'low' | 'medium' | 'high'
   readonly verdict: 'excellent' | 'review' | 'stalled'
@@ -74,6 +83,8 @@ export interface Config {
   mutationTools?: string[]
   /** Tool names treated as verification runs. */
   verificationTools?: string[]
+  /** Paths whose mutations require a verification run; defaults to source and config paths. */
+  verificationPaths?: string[]
 }
 
 export const Config: z<Config> = z.object({
@@ -86,6 +97,7 @@ export const Config: z<Config> = z.object({
   reportChannel: z.union([z.const('console'), z.const('event'), z.const('both'), z.const('none')]).default('console'),
   mutationTools: z.array(z.string()).default(['write', 'edit', 'apply_patch', 'str_replace_editor']),
   verificationTools: z.array(z.string()).default(['test', 'lint', 'typecheck', 'build', 'check']),
+  verificationPaths: z.array(z.string()).default(['src/**', 'packages/**', 'examples/**', 'scripts/**', '*.config.*', 'package.json', 'tsconfig*.json']),
 })
 
 /** A stable, machine-readable observation produced by a rule. */
@@ -137,6 +149,29 @@ function matchesTool(name: string, patterns: readonly string[]): boolean {
   })
 }
 
+function matchesPath(path: string, patterns: readonly string[]): boolean {
+  const normalized = path.replaceAll('\\', '/')
+  return patterns.some(pattern => {
+    const escaped = pattern.replace(/[|\\{}()[\]^$+?.]/g, String.raw`\\$&`)
+    return new RegExp(`^${escaped.replaceAll('*', '.*')}$`).test(normalized)
+  })
+}
+
+function pathsFrom(value: unknown): string[] {
+  if (typeof value === 'string') return [value]
+  if (Array.isArray(value)) return value.flatMap(pathsFrom)
+  if (value === null || typeof value !== 'object') return []
+  const record = value as Record<string, unknown>
+  return Object.entries(record)
+    .filter(([key]) => ['path', 'file', 'filePath', 'paths', 'files'].includes(key))
+    .flatMap(([, entry]) => pathsFrom(entry))
+}
+
+function needsVerification(args: unknown, patterns: readonly string[]): boolean {
+  const paths = pathsFrom(args)
+  return paths.length === 0 || paths.some(path => matchesPath(path, patterns))
+}
+
 function validatePositiveInteger(value: number, field: string): number {
   if (!Number.isInteger(value) || value < 1) throw new Error(`roast-office: ${field} must be a positive integer`)
   return value
@@ -184,21 +219,23 @@ export function buildBehaviorReport(metrics: BehaviorMetrics): BehaviorReport {
   const failureRatePenalty = metrics.calls === 0
     ? 0
     : Math.min(30, Math.round((metrics.failures / metrics.calls) * 30))
-  const score = Math.max(0, Math.min(100,
-    100
-      - metrics.repeatIncidents * 20
-      - metrics.failureIncidents * 15
-      - metrics.unverifiedChanges * 20
-      - failureRatePenalty))
+  const breakdown: BehaviorBreakdown = {
+    stability: Math.max(0, 100 - metrics.repeatIncidents * 20 - metrics.failureIncidents * 15 - failureRatePenalty),
+    completeness: Math.max(0, 100 - metrics.unverifiedChanges * 20),
+    efficiency: Math.max(0, 100 - Math.max(0, metrics.calls - metrics.uniqueTools * 2) * 5),
+    closure: Math.max(0, 100 - metrics.failures * 10 - metrics.unverifiedChanges * 10),
+  }
+  const score = Math.round((breakdown.stability + breakdown.completeness + breakdown.efficiency + breakdown.closure) / 4)
   const risk = score >= 85 ? 'low' : score >= 60 ? 'medium' : 'high'
   const verdict = score >= 85 ? 'excellent' : score >= 60 ? 'review' : 'stalled'
-  return { ...metrics, score, risk, verdict }
+  return { ...metrics, breakdown, score, risk, verdict }
 }
 
 function reportText(style: Style, report: BehaviorReport): string {
   const summary = `[吐槽办·clean-finish] 行为评分：${report.score}/100（${report.verdict}）\n`
     + `工具调用：${report.calls} 次；失败：${report.failures} 次；重复事件：${report.repeatIncidents} 次；失败重试：${report.failureIncidents} 次；使用工具：${report.uniqueTools} 种。\n`
     + `工作区改动：${report.mutations} 次；验证运行：${report.verificationRuns} 次；未验证改动：${report.unverifiedChanges} 次。\n`
+    + `稳定性：${report.breakdown.stability}；完整性：${report.breakdown.completeness}；效率：${report.breakdown.efficiency}；收尾：${report.breakdown.closure}。\n`
     + `风险等级：${report.risk}。`
   if (style === 'neutral') return summary + ' 建议：检查相关测试和工作区后再提交。'
   if (style === 'gentle') return summary + ' 可以再确认一次测试和工作区状态。'
@@ -232,7 +269,7 @@ function observe(
 ): Finding | undefined {
   state.calls += 1
   state.uniqueTools.add(exec.name)
-  if (matchesTool(exec.name, config.mutationTools)) {
+  if (matchesTool(exec.name, config.mutationTools) && needsVerification(exec.arguments, config.verificationPaths)) {
     state.mutations += 1
     state.verifiedSinceMutation = false
   } else if (matchesTool(exec.name, config.verificationTools)) {
@@ -292,6 +329,7 @@ export function apply(ctx: Context, rawConfig: Config): void {
     reportChannel: rawConfig.reportChannel ?? 'console',
     mutationTools: rawConfig.mutationTools ?? ['write', 'edit', 'apply_patch', 'str_replace_editor'],
     verificationTools: rawConfig.verificationTools ?? ['test', 'lint', 'typecheck', 'build', 'check'],
+    verificationPaths: rawConfig.verificationPaths ?? ['src/**', 'packages/**', 'examples/**', 'scripts/**', '*.config.*', 'package.json', 'tsconfig*.json'],
   }
   const states = new WeakMap<Agent, AgentState>()
 

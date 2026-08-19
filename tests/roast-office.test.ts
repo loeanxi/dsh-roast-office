@@ -40,9 +40,15 @@ describe('dsh-roast-office', () => {
       mutations: 0,
       verificationRuns: 0,
       unverifiedChanges: 0,
-      score: 59,
-      risk: 'high',
-      verdict: 'stalled',
+      breakdown: {
+        stability: 59,
+        completeness: 100,
+        efficiency: 90,
+        closure: 80,
+      },
+      score: 82,
+      risk: 'medium',
+      verdict: 'review',
     })
   })
 
@@ -97,6 +103,12 @@ describe('dsh-roast-office', () => {
       mutations: 0,
       verificationRuns: 0,
       unverifiedChanges: 0,
+      breakdown: {
+        stability: 100,
+        completeness: 100,
+        efficiency: 100,
+        closure: 100,
+      },
       score: 100,
       risk: 'low',
       verdict: 'excellent',
@@ -120,9 +132,12 @@ describe('dsh-roast-office', () => {
       mutations: 1,
       verificationRuns: 0,
       unverifiedChanges: 1,
-      score: 80,
-      risk: 'medium',
-      verdict: 'review',
+      breakdown: {
+        completeness: 80,
+      },
+      score: 93,
+      risk: 'low',
+      verdict: 'excellent',
     })
   })
 
@@ -144,8 +159,22 @@ describe('dsh-roast-office', () => {
       mutations: 1,
       verificationRuns: 1,
       unverifiedChanges: 0,
+      breakdown: {
+        completeness: 100,
+      },
       score: 100,
       verdict: 'excellent',
     })
+  })
+
+  it('ignores documentation-only mutations for verification completeness', async () => {
+    const ctx = new Context()
+    const reports: RoastOffice.BehaviorReport[] = []
+    ctx.on('roast-office/report', ({ report }) => { reports.push(report) })
+    await ctx.plugin(RoastOffice, { channels: ['context'], reportChannel: 'event' })
+    const agent = {} as Agent
+    await post(ctx, execution(agent, 'write', { path: 'README.md' }), success())
+    ctx.emit(ctx as never, 'agent/status', { agent, status: 'idle' })
+    expect(reports[0]).toMatchObject({ mutations: 0, unverifiedChanges: 0, score: 100 })
   })
 })
