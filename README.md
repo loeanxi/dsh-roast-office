@@ -4,6 +4,28 @@
 
 This repository is an independent dsh plugin project. It targets published dsh package APIs instead of importing monorepo workspace paths.
 
+## Run the demo
+
+The demo builds the package, loads the real compiled plugin entrypoint, simulates a source mutation followed by a failed test, and prints the roast plus the structured report:
+
+```sh
+npm run build
+npm run demo
+```
+
+For a one-command run after dependencies are installed, use `npm run demo:build`.
+
+The plugin can also be mounted by a dsh Cordis composition after the package is installed and built:
+
+```yaml
+- '@dsh-plugins/roast-office':
+    style: roast
+    channels: [console]
+    reportChannel: event
+```
+
+It is observational only: it calls `next()` on the tool waterfall and returns the downstream decision unchanged.
+
 ## Config
 
 ```yaml
