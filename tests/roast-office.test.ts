@@ -195,6 +195,44 @@ describe('dsh-roast-office', () => {
     expect(results[0]?.requestId).toMatch(/^review-/)
   })
 
+  it('runs the default dsh subagent reviewer with structured output and disposes it', async () => {
+    let disposed = false
+    let seenProvider = ''
+    const parent = {} as Agent
+    const reviewer = RoastOffice.createSubagentReviewer({
+      start: async (provider, request) => {
+        seenProvider = provider
+        expect(request.parent).toBe(parent)
+        expect(request.outputSchema).toBeDefined()
+        return {
+          result: Promise.resolve({
+            stopReason: 'completed',
+            output: [],
+            structured: {
+              summary: '独立评审完成',
+              findings: [],
+              confidence: 'high',
+              evidence: [{ code: 'score', label: '行为评分', value: 90 }],
+              needsSecondReview: false,
+            },
+          }),
+          dispose: async () => { disposed = true },
+        }
+      },
+    }, 'spawn')
+    const result = await reviewer.review({
+      requestId: 'review-test',
+      scope: 'turn',
+      trigger: 'manual',
+      report: RoastOffice.buildBehaviorReport({ calls: 1, failures: 0, repeatIncidents: 0, failureIncidents: 0, uniqueTools: 1, mutations: 0, verificationRuns: 0, unverifiedChanges: 0 }),
+      observations: [{ tool: 'read', succeeded: true }],
+      reviewer: 'independent-agent',
+    }, parent)
+    expect(seenProvider).toBe('spawn')
+    expect(result.summary).toBe('独立评审完成')
+    expect(disposed).toBe(true)
+  })
+
 
   it('emits a failed-retry notice for the second identical failure', async () => {
     const ctx = new Context()
