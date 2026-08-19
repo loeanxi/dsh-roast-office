@@ -31,6 +31,9 @@ export interface BehaviorMetrics {
   readonly repeatIncidents: number
   readonly failureIncidents: number
   readonly uniqueTools: number
+  readonly mutations: number
+  readonly verificationRuns: number
+  readonly unverifiedChanges: number
 }
 
 /** Deterministic turn-level behavior report. */
@@ -67,6 +70,10 @@ export interface Config {
   cleanFinish?: boolean
   /** Destination for the structured turn-end report; defaults to `console`. */
   reportChannel?: ReportChannel
+  /** Tool names treated as workspace mutations. */
+  mutationTools?: string[]
+  /** Tool names treated as verification runs. */
+  verificationTools?: string[]
 }
 
 export const Config: z<Config> = z.object({
@@ -77,6 +84,8 @@ export const Config: z<Config> = z.object({
   maxFindingsPerTurn: z.number().default(3),
   cleanFinish: z.boolean().default(true),
   reportChannel: z.union([z.const('console'), z.const('event'), z.const('both'), z.const('none')]).default('console'),
+  mutationTools: z.array(z.string()).default(['write', 'edit', 'apply_patch', 'str_replace_editor']),
+  verificationTools: z.array(z.string()).default(['test', 'lint', 'typecheck', 'build', 'check']),
 })
 
 /** A stable, machine-readable observation produced by a rule. */
@@ -98,6 +107,9 @@ interface AgentState {
   repeatIncidents: number
   failureIncidents: number
   uniqueTools: Set<string>
+  mutations: number
+  verificationRuns: number
+  verifiedSinceMutation: boolean
 }
 
 const PLUGIN_SOURCE: MessageSource = { kind: 'plugin', plugin: 'roast-office' }
@@ -118,6 +130,13 @@ export function canonicalize(value: unknown): string {
   return JSON.stringify(sortJson(value))
 }
 
+function matchesTool(name: string, patterns: readonly string[]): boolean {
+  return patterns.some(pattern => {
+    const escaped = pattern.replace(/[|\\{}()[\]^$+?.]/g, String.raw`\\$&`)
+    return new RegExp(`^${escaped.replaceAll('*', '.*')}$`).test(name)
+  })
+}
+
 function validatePositiveInteger(value: number, field: string): number {
   if (!Number.isInteger(value) || value < 1) throw new Error(`roast-office: ${field} must be a positive integer`)
   return value
@@ -135,6 +154,9 @@ function stateFor(states: WeakMap<Agent, AgentState>, agent: Agent): AgentState 
     repeatIncidents: 0,
     failureIncidents: 0,
     uniqueTools: new Set(),
+    mutations: 0,
+    verificationRuns: 0,
+    verifiedSinceMutation: false,
   }
   states.set(agent, created)
   return created
@@ -163,7 +185,11 @@ export function buildBehaviorReport(metrics: BehaviorMetrics): BehaviorReport {
     ? 0
     : Math.min(30, Math.round((metrics.failures / metrics.calls) * 30))
   const score = Math.max(0, Math.min(100,
-    100 - metrics.repeatIncidents * 20 - metrics.failureIncidents * 15 - failureRatePenalty))
+    100
+      - metrics.repeatIncidents * 20
+      - metrics.failureIncidents * 15
+      - metrics.unverifiedChanges * 20
+      - failureRatePenalty))
   const risk = score >= 85 ? 'low' : score >= 60 ? 'medium' : 'high'
   const verdict = score >= 85 ? 'excellent' : score >= 60 ? 'review' : 'stalled'
   return { ...metrics, score, risk, verdict }
@@ -172,6 +198,7 @@ export function buildBehaviorReport(metrics: BehaviorMetrics): BehaviorReport {
 function reportText(style: Style, report: BehaviorReport): string {
   const summary = `[吐槽办·clean-finish] 行为评分：${report.score}/100（${report.verdict}）\n`
     + `工具调用：${report.calls} 次；失败：${report.failures} 次；重复事件：${report.repeatIncidents} 次；失败重试：${report.failureIncidents} 次；使用工具：${report.uniqueTools} 种。\n`
+    + `工作区改动：${report.mutations} 次；验证运行：${report.verificationRuns} 次；未验证改动：${report.unverifiedChanges} 次。\n`
     + `风险等级：${report.risk}。`
   if (style === 'neutral') return summary + ' 建议：检查相关测试和工作区后再提交。'
   if (style === 'gentle') return summary + ' 可以再确认一次测试和工作区状态。'
@@ -205,6 +232,13 @@ function observe(
 ): Finding | undefined {
   state.calls += 1
   state.uniqueTools.add(exec.name)
+  if (matchesTool(exec.name, config.mutationTools)) {
+    state.mutations += 1
+    state.verifiedSinceMutation = false
+  } else if (matchesTool(exec.name, config.verificationTools)) {
+    state.verificationRuns += 1
+    if (state.mutations > 0) state.verifiedSinceMutation = true
+  }
   const callKey = JSON.stringify([exec.name, canonicalize(exec.arguments)])
   state.repeatedCalls = state.lastCallKey === callKey ? state.repeatedCalls + 1 : 1
   state.lastCallKey = callKey
@@ -256,6 +290,8 @@ export function apply(ctx: Context, rawConfig: Config): void {
     maxFindingsPerTurn: validatePositiveInteger(rawConfig.maxFindingsPerTurn ?? 3, 'maxFindingsPerTurn'),
     cleanFinish: rawConfig.cleanFinish ?? true,
     reportChannel: rawConfig.reportChannel ?? 'console',
+    mutationTools: rawConfig.mutationTools ?? ['write', 'edit', 'apply_patch', 'str_replace_editor'],
+    verificationTools: rawConfig.verificationTools ?? ['test', 'lint', 'typecheck', 'build', 'check'],
   }
   const states = new WeakMap<Agent, AgentState>()
 
@@ -285,6 +321,9 @@ export function apply(ctx: Context, rawConfig: Config): void {
       repeatIncidents: state.repeatIncidents,
       failureIncidents: state.failureIncidents,
       uniqueTools: state.uniqueTools.size,
+      mutations: state.mutations,
+      verificationRuns: state.verificationRuns,
+      unverifiedChanges: state.mutations > 0 && !state.verifiedSinceMutation ? 1 : 0,
     })
     const text = reportText(config.style, report)
     if (config.reportChannel === 'console' || config.reportChannel === 'both') ctx.logger.info(text)

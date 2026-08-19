@@ -28,12 +28,18 @@ describe('dsh-roast-office', () => {
       repeatIncidents: 1,
       failureIncidents: 1,
       uniqueTools: 4,
+      mutations: 0,
+      verificationRuns: 0,
+      unverifiedChanges: 0,
     })).toEqual({
       calls: 10,
       failures: 2,
       repeatIncidents: 1,
       failureIncidents: 1,
       uniqueTools: 4,
+      mutations: 0,
+      verificationRuns: 0,
+      unverifiedChanges: 0,
       score: 59,
       risk: 'high',
       verdict: 'stalled',
@@ -88,9 +94,58 @@ describe('dsh-roast-office', () => {
       repeatIncidents: 0,
       failureIncidents: 0,
       uniqueTools: 1,
+      mutations: 0,
+      verificationRuns: 0,
+      unverifiedChanges: 0,
       score: 100,
       risk: 'low',
       verdict: 'excellent',
     }])
+  })
+
+  it('penalizes a mutation that has not been verified', async () => {
+    const ctx = new Context()
+    const reports: RoastOffice.BehaviorReport[] = []
+    ctx.on('roast-office/report', ({ report }) => { reports.push(report) })
+    await ctx.plugin(RoastOffice, {
+      channels: ['context'],
+      reportChannel: 'event',
+      mutationTools: ['write'],
+      verificationTools: ['test'],
+    })
+    const agent = {} as Agent
+    await post(ctx, execution(agent, 'write', { path: 'src/index.ts' }), success())
+    ctx.emit(ctx as never, 'agent/status', { agent, status: 'idle' })
+    expect(reports[0]).toMatchObject({
+      mutations: 1,
+      verificationRuns: 0,
+      unverifiedChanges: 1,
+      score: 80,
+      risk: 'medium',
+      verdict: 'review',
+    })
+  })
+
+  it('clears the unverified-change penalty after a verification run', async () => {
+    const ctx = new Context()
+    const reports: RoastOffice.BehaviorReport[] = []
+    ctx.on('roast-office/report', ({ report }) => { reports.push(report) })
+    await ctx.plugin(RoastOffice, {
+      channels: ['context'],
+      reportChannel: 'event',
+      mutationTools: ['write'],
+      verificationTools: ['test'],
+    })
+    const agent = {} as Agent
+    await post(ctx, execution(agent, 'write', { path: 'src/index.ts' }), success())
+    await post(ctx, execution(agent, 'test', { scope: 'unit' }), success())
+    ctx.emit(ctx as never, 'agent/status', { agent, status: 'idle' })
+    expect(reports[0]).toMatchObject({
+      mutations: 1,
+      verificationRuns: 1,
+      unverifiedChanges: 0,
+      score: 100,
+      verdict: 'excellent',
+    })
   })
 })

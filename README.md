@@ -17,15 +17,17 @@ This repository is an independent dsh plugin project. It targets published dsh p
     maxFindingsPerTurn: 3
     cleanFinish: true
     reportChannel: console
+    mutationTools: [write, edit, apply_patch, str_replace_editor]
+    verificationTools: [test, lint, typecheck, build, check]
 ```
 
 `style` accepts `neutral`, `gentle`, or `roast`. `context` adds a plugin-sourced notice to the next model request; `console` writes the rendered finding to the context logger. The default configuration enables both channels.
 
-`reportChannel` accepts `console`, `event`, `both`, or `none`. The `event` option emits a structured `roast-office/report` event for UI, telemetry, or other plugins without requiring them to parse logger text.
+`reportChannel` accepts `console`, `event`, `both`, or `none`. The `event` option emits a structured `roast-office/report` event for UI, telemetry, or other plugins without requiring them to parse logger text. `mutationTools` and `verificationTools` accept exact names or `*` wildcards.
 
-The observer detects `repeat-call` when one Agent invokes the same tool with canonicalized identical arguments consecutively. It detects `failed-retry` when the same tool and failure code/message repeat consecutively. `clean-finish` is emitted to the console when an agent becomes idle after at least one call and includes calls, failures, repeat incidents, failure retries, unique tools, score, risk, and verdict.
+The observer detects `repeat-call` when one Agent invokes the same tool with canonicalized identical arguments consecutively. It detects `failed-retry` when the same tool and failure code/message repeat consecutively. `clean-finish` is emitted to the console when an agent becomes idle after at least one call and includes calls, failures, repeat incidents, failure retries, unique tools, mutations, verification runs, unverified changes, score, risk, and verdict.
 
-Finding facts and reports are deterministic and contain only tool names, counts, and failure summaries needed by the rule. The score starts at 100, subtracts 20 per repeat incident, 15 per failure-retry incident, and up to 30 for the failure rate. Scores from 85 are `low` risk, scores from 60 are `medium` risk, and lower scores are `high` risk. The roast renderer targets behavior, never the user's identity or ability. Tool results and policy decisions pass through unchanged.
+Finding facts and reports are deterministic and contain only tool names, counts, and failure summaries needed by the rule. The score starts at 100, subtracts 20 per repeat incident, 15 per failure-retry incident, 20 per unverified change window, and up to 30 for the failure rate. A mutation remains unverified until a configured verification tool runs later in the same turn. Scores from 85 are `low` risk, scores from 60 are `medium` risk, and lower scores are `high` risk. The roast renderer targets behavior, never the user's identity or ability. Tool results and policy decisions pass through unchanged.
 
 ## Model Experience
 
@@ -52,4 +54,4 @@ The exported `canonicalize` function defines argument equality for the repeat ru
 - Reports are emitted at the agent idle transition and are not persisted as a new session event.
 - `clean-finish` is logger-only because the status event does not carry a post-turn decision context.
 - Failure matching includes the full normalized error message, so similar failures with different dynamic text do not coalesce.
-- Search-without-progress, scope drift, and unverified-change rules remain deferred until their evidence windows are defined.
+- Search-without-progress and scope drift remain deferred until their evidence windows are defined.
