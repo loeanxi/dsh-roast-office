@@ -9,6 +9,18 @@
     ".": {
       "types": "./lib/src/index.d.ts",
       "default": "./lib/src/index.js"
+    },
+    "./client": {
+      "default": "./client/index.js"
+    }
+  },
+  "dsh": {
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-conversation"
+      ],
+      "platform": "web"
     }
   },
   "scripts": {
@@ -21,6 +33,7 @@
   "files": [
     "lib/**/*.js",
     "lib/**/*.d.ts",
+    "client/**/*.js",
     "README.md",
     "package.json",
     "research/design.md"
@@ -31,7 +44,15 @@
     "@deepseek-ai/dsh-agent": "*",
     "@deepseek-ai/dsh-llm": "*",
     "@deepseek-ai/dsh-tools": "*",
-    "@deepseek-ai/schemastery": "*"
+    "@deepseek-ai/schemastery": "*",
+    "@deepseek-ai/dsh-client-runtime": "*",
+    "@deepseek-ai/dsh-client-ui-conversation": "*",
+    "react": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-runtime": { "optional": true },
+    "@deepseek-ai/dsh-client-ui-conversation": { "optional": true },
+    "react": { "optional": true }
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "latest",

@@ -664,6 +664,30 @@ export function apply(ctx: Context, rawConfig: Config): void {
 
   const requestId = (): string => `review-${++nextReviewId}`
 
+  const maybeCommands = (() => {
+    try {
+      return (ctx as unknown as { get(name: string): unknown }).get('commands') as { register?: (definition: unknown) => unknown } | undefined
+    } catch {
+      return undefined
+    }
+  })()
+  if (maybeCommands?.register !== undefined) {
+    const disposer = maybeCommands.register({
+      name: 'review',
+      description: 'request an independent roast-office review',
+      input: { hint: 'turn | selection | session' },
+      recordInput: false,
+      handler: (invocation: { agent: Agent; rawInput: string }): { kind: 'success'; text: string } => {
+        const scope = invocation.rawInput.trim() === 'session' || invocation.rawInput.trim() === 'selection'
+          ? invocation.rawInput.trim() as ReviewScope
+          : 'turn'
+        ctx.emit(ctx as never, 'roast-office/request-review', { agent: invocation.agent, scope })
+        return { kind: 'success', text: '已提交独立评审请求。' }
+      },
+    })
+    if (typeof disposer === 'function') ctx.effect(() => disposer as () => void, 'roast-office: review command')
+  }
+
   ctx.on('roast-office/request-review', ({ agent, scope }) => {
     const state = states.get(agent)
     if (state !== undefined && state.calls > 0) {
