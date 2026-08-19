@@ -69,12 +69,44 @@ export interface ReviewObservation {
 
 /** Structured request for a reviewer Agent running outside the execution turn. */
 export interface ReviewRequest {
+  readonly requestId: string
   readonly agent: Agent
   readonly scope: ReviewScope
   readonly trigger: ReviewTrigger
   readonly report: BehaviorReport
   readonly observations: readonly ReviewObservation[]
   readonly reviewer: 'independent-agent'
+}
+
+/** Evidence visible to the separate reviewer; the execution Agent is excluded. */
+export type IndependentReviewInput = Omit<ReviewRequest, 'agent'>
+
+/** One finding returned by an independent reviewer. */
+export interface ReviewFinding {
+  readonly code: string
+  readonly severity: 'info' | 'warning' | 'critical'
+  readonly message: string
+}
+
+/** Result published after a separate reviewer Agent handles a request. */
+export interface ReviewResult {
+  readonly requestId: string
+  readonly agent: Agent
+  readonly status: 'completed' | 'failed'
+  readonly summary: string
+  readonly findings: readonly ReviewFinding[]
+  readonly reviewer: 'independent-agent'
+  readonly error?: string
+}
+
+/** Host-owned runner for a separate, read-only reviewer Agent. */
+export interface IndependentReviewer {
+  /**
+   * Review sanitized evidence in a separate Agent session.
+   * @param request - request without raw tool arguments or file contents.
+   * @returns the review summary and findings to publish to the UI.
+   */
+  review(request: IndependentReviewInput): Promise<Pick<ReviewResult, 'summary' | 'findings'>>
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -97,6 +129,12 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'roast-office/review-request'(payload: ReviewRequest): void
+    /**
+     * Emitted when the independent reviewer finishes or fails.
+     * @param payload - the review result for the matching request id.
+     * @mode emit
+     */
+    'roast-office/review-result'(payload: ReviewResult): void
   }
 }
 
@@ -330,34 +368,54 @@ function reportFromState(state: AgentState): BehaviorReport {
   })
 }
 
-function emitReviewRequest(
-  ctx: Context,
-  agent: Agent,
-  state: AgentState,
-  scope: ReviewScope,
-  trigger: ReviewTrigger,
-  config: Required<Config>,
-): void {
-  emitReviewSnapshot(ctx, agent, {
-    report: reportFromState(state),
-    observations: state.observations.slice(-config.maxReviewObservations),
-  }, scope, trigger)
-}
-
 function emitReviewSnapshot(
   ctx: Context,
   agent: Agent,
   snapshot: ReviewSnapshot,
   scope: ReviewScope,
   trigger: ReviewTrigger,
+  requestId: string,
 ): void {
   ctx.emit(ctx as never, 'roast-office/review-request', {
     agent,
+    requestId,
     scope,
     trigger,
     report: snapshot.report,
     observations: snapshot.observations,
     reviewer: 'independent-agent',
+  })
+}
+
+/**
+ * Connect a host-owned independent reviewer to the review request protocol.
+ * @param ctx - Cordis context carrying roast-office events.
+ * @param reviewer - runner backed by a separate reviewer Agent session.
+ * @returns a disposer for the event consumer.
+ */
+export function installIndependentReviewer(ctx: Context, reviewer: IndependentReviewer): () => void {
+  return ctx.on('roast-office/review-request', request => {
+    const { agent: _executionAgent, ...reviewInput } = request
+    void Promise.resolve().then(() => reviewer.review(reviewInput)).then(result => {
+      ctx.emit(ctx as never, 'roast-office/review-result', {
+        requestId: request.requestId,
+        agent: request.agent,
+        status: 'completed',
+        summary: result.summary,
+        findings: result.findings,
+        reviewer: 'independent-agent',
+      })
+    }).catch(error => {
+      ctx.emit(ctx as never, 'roast-office/review-result', {
+        requestId: request.requestId,
+        agent: request.agent,
+        status: 'failed',
+        summary: '独立评审 Agent 未能完成评审。',
+        findings: [],
+        reviewer: 'independent-agent',
+        error: error instanceof Error ? error.message : String(error),
+      })
+    })
   })
 }
 
@@ -458,15 +516,21 @@ export function apply(ctx: Context, rawConfig: Config): void {
   const states = new WeakMap<Agent, AgentState>()
   const history = new WeakMap<Agent, number[]>()
   const lastReviews = new WeakMap<Agent, ReviewSnapshot>()
+  let nextReviewId = 0
+
+  const requestId = (): string => `review-${++nextReviewId}`
 
   ctx.on('roast-office/request-review', ({ agent, scope }) => {
     const state = states.get(agent)
     if (state !== undefined && state.calls > 0) {
-      emitReviewRequest(ctx, agent, state, scope, 'manual', config)
+      emitReviewSnapshot(ctx, agent, {
+        report: reportFromState(state),
+        observations: state.observations.slice(-config.maxReviewObservations),
+      }, scope, 'manual', requestId())
       return
     }
     const snapshot = lastReviews.get(agent)
-    if (snapshot !== undefined) emitReviewSnapshot(ctx, agent, snapshot, scope, 'manual')
+    if (snapshot !== undefined) emitReviewSnapshot(ctx, agent, snapshot, scope, 'manual', requestId())
   })
 
   ctx.on('tools/post-execute', async (exec, result, next): Promise<PostToolDecision> => {
@@ -478,7 +542,10 @@ export function apply(ctx: Context, rawConfig: Config): void {
       const nextDecision = emit(ctx, finding, config, state, { agent: exec.agent, decision })
       if (config.autoReview && config.reviewTriggers.includes('threshold') && !state.reviewRequested) {
         state.reviewRequested = true
-        emitReviewRequest(ctx, exec.agent, state, 'turn', 'threshold', config)
+        emitReviewSnapshot(ctx, exec.agent, {
+          report: reportFromState(state),
+          observations: state.observations.slice(-config.maxReviewObservations),
+        }, 'turn', 'threshold', requestId())
       }
       return nextDecision
     }
@@ -512,7 +579,7 @@ export function apply(ctx: Context, rawConfig: Config): void {
       emitReviewSnapshot(ctx, agent, {
         report: reportWithTrend,
         observations: state.observations.slice(-config.maxReviewObservations),
-      }, 'turn', 'turn-end')
+      }, 'turn', 'turn-end', requestId())
     }
     const text = reportText(config.style, reportWithTrend)
     if (config.reportChannel === 'console' || config.reportChannel === 'both') ctx.logger.info(text)

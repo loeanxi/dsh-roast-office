@@ -127,6 +127,32 @@ describe('dsh-roast-office', () => {
     expect(requests[0]).toMatchObject({ scope: 'turn', trigger: 'manual', report: { calls: 1 } })
   })
 
+  it('bridges requests to an independent reviewer and publishes the result', async () => {
+    const ctx = new Context()
+    const results: RoastOffice.ReviewResult[] = []
+    ctx.on('roast-office/review-result', result => { results.push(result) })
+    RoastOffice.installIndependentReviewer(ctx, {
+      async review(request) {
+        expect(request.reviewer).toBe('independent-agent')
+        expect(request.observations[0]?.tool).toBe('read')
+        expect('agent' in request).toBe(false)
+        return { summary: '需要复核', findings: [{ code: 'repeat-call', severity: 'warning', message: '重复读取。' }] }
+      },
+    })
+    await ctx.plugin(RoastOffice, { autoReview: false, reportChannel: 'none' })
+    const agent = {} as Agent
+    await post(ctx, execution(agent, 'read', { path: 'README.md' }), success())
+    ctx.emit(ctx as never, 'roast-office/request-review', { agent, scope: 'turn' })
+    await vi.waitFor(() => expect(results).toHaveLength(1))
+    expect(results[0]).toMatchObject({
+      status: 'completed',
+      reviewer: 'independent-agent',
+      summary: '需要复核',
+      findings: [{ code: 'repeat-call' }],
+    })
+    expect(results[0]?.requestId).toMatch(/^review-/)
+  })
+
   it('emits a failed-retry notice for the second identical failure', async () => {
     const ctx = new Context()
     await ctx.plugin(RoastOffice, { channels: ['context'], failureThreshold: 2 })
