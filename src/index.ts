@@ -131,7 +131,22 @@ export interface IndependentReviewer {
    * @param request - request without raw tool arguments or file contents.
    * @returns the review summary and findings to publish to the UI.
    */
-  review(request: IndependentReviewInput): Promise<ReviewConclusion>
+  review(request: IndependentReviewInput, parent?: Agent): Promise<ReviewConclusion>
+}
+
+interface SubagentResultLike {
+  readonly structured?: unknown
+  readonly output: readonly unknown[]
+  readonly stopReason: string
+}
+
+interface SubagentRunLike {
+  readonly result: Promise<SubagentResultLike>
+  dispose(): Promise<void>
+}
+
+interface SubagentServiceLike {
+  start(provider: string, request: Record<string, unknown>): Promise<SubagentRunLike>
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -193,6 +208,8 @@ export interface Config {
   reviewTriggers?: ReviewTrigger[]
   /** Maximum sanitized tool observations included in one review request. */
   maxReviewObservations?: number
+  /** dsh subagent provider used for the default independent reviewer. */
+  reviewerProvider?: string
 }
 
 export const Config: z<Config> = z.object({
@@ -210,6 +227,7 @@ export const Config: z<Config> = z.object({
   autoReview: z.boolean().default(true),
   reviewTriggers: z.array(z.union([z.const('threshold'), z.const('turn-end'), z.const('manual')])).default(['threshold', 'turn-end']),
   maxReviewObservations: z.number().default(20),
+  reviewerProvider: z.string().default('spawn'),
 })
 
 /** A stable, machine-readable observation produced by a rule. */
@@ -422,7 +440,7 @@ function emitReviewSnapshot(
 export function installIndependentReviewer(ctx: Context, reviewer: IndependentReviewer): () => void {
   return ctx.on('roast-office/review-request', request => {
     const { agent: _executionAgent, ...reviewInput } = request
-    void Promise.resolve().then(() => reviewer.review(reviewInput)).then(result => {
+    void Promise.resolve().then(() => reviewer.review(reviewInput, request.agent)).then(result => {
       ctx.emit(ctx as never, 'roast-office/review-result', {
         requestId: request.requestId,
         agent: request.agent,
@@ -451,6 +469,67 @@ export function installIndependentReviewer(ctx: Context, reviewer: IndependentRe
       })
     })
   })
+}
+
+const REVIEW_OUTPUT_SCHEMA: Record<string, unknown> = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['summary', 'findings', 'confidence', 'evidence', 'needsSecondReview'],
+  properties: {
+    summary: { type: 'string' },
+    findings: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['code', 'severity', 'message'], properties: { code: { type: 'string' }, severity: { type: 'string', enum: ['info', 'warning', 'critical'] }, message: { type: 'string' } } } },
+    confidence: { type: 'string', enum: ['low', 'medium', 'high'] },
+    evidence: { type: 'array', items: { type: 'object', additionalProperties: false, required: ['code', 'label', 'value'], properties: { code: { type: 'string' }, label: { type: 'string' }, value: { type: ['string', 'number'] } } } },
+    needsSecondReview: { type: 'boolean' },
+  },
+}
+
+function textFromSubagentOutput(output: readonly unknown[]): string {
+  return output
+    .filter((block): block is { type: 'text'; text: string } => typeof block === 'object' && block !== null && !Array.isArray(block) && (block as Record<string, unknown>).type === 'text' && typeof (block as Record<string, unknown>).text === 'string')
+    .map(block => block.text)
+    .join('')
+}
+
+function parseAgentConclusion(value: unknown): ReviewConclusion | undefined {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return undefined
+  const record = value as Record<string, unknown>
+  if (typeof record.summary !== 'string' || !Array.isArray(record.findings) || !Array.isArray(record.evidence) || typeof record.needsSecondReview !== 'boolean') return undefined
+  if (record.confidence !== 'low' && record.confidence !== 'medium' && record.confidence !== 'high') return undefined
+  const findings = record.findings.filter((item): item is ReviewFinding => typeof item === 'object' && item !== null && !Array.isArray(item) && typeof (item as Record<string, unknown>).code === 'string' && (item as Record<string, unknown>).severity !== undefined && typeof (item as Record<string, unknown>).message === 'string')
+  const evidence = record.evidence.filter((item): item is ReviewEvidence => typeof item === 'object' && item !== null && !Array.isArray(item) && typeof (item as Record<string, unknown>).code === 'string' && typeof (item as Record<string, unknown>).label === 'string' && (typeof (item as Record<string, unknown>).value === 'string' || typeof (item as Record<string, unknown>).value === 'number'))
+  if (findings.length !== record.findings.length || evidence.length !== record.evidence.length) return undefined
+  if (findings.some(item => item.severity !== 'info' && item.severity !== 'warning' && item.severity !== 'critical')) return undefined
+  return { summary: record.summary, findings, confidence: record.confidence, evidence, needsSecondReview: record.needsSecondReview }
+}
+
+/** Create a reviewer backed by the host's independent dsh subagent provider. */
+export function createSubagentReviewer(subagents: SubagentServiceLike, provider: string): IndependentReviewer {
+  return {
+    async review(request, parent): Promise<ReviewConclusion> {
+      if (parent === undefined) throw new Error('subagent reviewer requires the execution Agent as parent')
+      const prompt = `你是独立的 Agent 行为评审员。只根据下面的脱敏 JSON 评审，不执行工具，不读取文件。输出必须符合给定 JSON schema。\n${JSON.stringify(request)}`
+      const run = await subagents.start(provider, {
+        label: 'dsh-roast-office independent review',
+        parent,
+        signal: new AbortController().signal,
+        prompt: [{ type: 'text', text: prompt }],
+        outputSchema: REVIEW_OUTPUT_SCHEMA,
+      })
+      try {
+        const result = await run.result
+        if (result.stopReason !== 'completed') throw new Error(`reviewer subagent ended with ${result.stopReason}`)
+        const structured = parseAgentConclusion(result.structured)
+        if (structured !== undefined) return structured
+        const text = textFromSubagentOutput(result.output)
+        const parsed = parseAgentConclusion(JSON.parse(text))
+        if (parsed === undefined) throw new Error('reviewer subagent returned invalid review JSON')
+        return parsed
+      } finally {
+        await run.dispose()
+      }
+    },
+  }
 }
 
 /**
@@ -611,12 +690,24 @@ export function apply(ctx: Context, rawConfig: Config): void {
     autoReview: rawConfig.autoReview ?? true,
     reviewTriggers: rawConfig.reviewTriggers ?? ['threshold', 'turn-end'],
     maxReviewObservations: validatePositiveInteger(rawConfig.maxReviewObservations ?? 20, 'maxReviewObservations'),
+    reviewerProvider: rawConfig.reviewerProvider ?? 'spawn',
   }
   const states = new WeakMap<Agent, AgentState>()
   const history = new WeakMap<Agent, number[]>()
   const lastReviews = new WeakMap<Agent, ReviewSnapshot>()
   let nextReviewId = 0
   const fallbackReviewer = createDeterministicReviewer()
+  const subagents = (() => {
+    try {
+      return (ctx as unknown as { get(name: string): unknown }).get('subagents') as SubagentServiceLike | undefined
+    } catch {
+      return undefined
+    }
+  })()
+  const activeReviewer = subagents === undefined ? fallbackReviewer : createSubagentReviewer(subagents, config.reviewerProvider)
+  if (subagents !== undefined) {
+    ctx.effect(() => installIndependentReviewer(ctx, activeReviewer), 'roast-office: independent reviewer')
+  }
 
   const requestId = (): string => `review-${++nextReviewId}`
 
