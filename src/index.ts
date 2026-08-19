@@ -105,8 +105,23 @@ export interface ReviewResult {
   readonly confidence: 'low' | 'medium' | 'high'
   readonly evidence: readonly ReviewEvidence[]
   readonly needsSecondReview: boolean
+  readonly consensus: 'single' | 'unanimous' | 'majority' | 'split'
   readonly reviewer: 'independent-agent'
   readonly error?: string
+}
+
+/** Fields a reviewer returns before the bridge adds request identity. */
+export interface ReviewConclusion {
+  readonly summary: string
+  readonly findings: readonly ReviewFinding[]
+  readonly confidence: 'low' | 'medium' | 'high'
+  readonly evidence: readonly ReviewEvidence[]
+  readonly needsSecondReview: boolean
+}
+
+/** A consensus conclusion returned by more than one reviewer. */
+export interface ReviewConsensus extends ReviewConclusion {
+  readonly consensus: 'unanimous' | 'majority' | 'split'
 }
 
 /** Host-owned runner for a separate, read-only reviewer Agent. */
@@ -116,7 +131,7 @@ export interface IndependentReviewer {
    * @param request - request without raw tool arguments or file contents.
    * @returns the review summary and findings to publish to the UI.
    */
-  review(request: IndependentReviewInput): Promise<Pick<ReviewResult, 'summary' | 'findings' | 'confidence' | 'evidence' | 'needsSecondReview'>>
+  review(request: IndependentReviewInput): Promise<ReviewConclusion>
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -416,6 +431,7 @@ export function installIndependentReviewer(ctx: Context, reviewer: IndependentRe
         confidence: result.confidence,
         evidence: result.evidence,
         needsSecondReview: result.needsSecondReview,
+        consensus: 'single',
         reviewer: 'independent-agent',
       })
     }).catch(error => {
@@ -428,11 +444,77 @@ export function installIndependentReviewer(ctx: Context, reviewer: IndependentRe
         confidence: 'low',
         evidence: [],
         needsSecondReview: true,
+        consensus: 'single',
         reviewer: 'independent-agent',
         error: error instanceof Error ? error.message : String(error),
       })
     })
   })
+}
+
+/**
+ * Create a model-free reviewer backed only by the deterministic behavior report.
+ * @returns a reviewer suitable as the host fallback when no reviewer Agent is configured.
+ */
+export function createDeterministicReviewer(): IndependentReviewer {
+  return {
+    async review(request): Promise<ReviewConclusion> {
+      const findings: ReviewFinding[] = []
+      const evidence: ReviewEvidence[] = [
+        { code: 'score', label: '行为评分', value: request.report.score },
+        { code: 'risk', label: '风险等级', value: request.report.risk },
+        { code: 'calls', label: '工具调用次数', value: request.report.calls },
+      ]
+      if (request.report.repeatIncidents > 0) {
+        findings.push({ code: 'repeat-call', severity: 'warning', message: `检测到 ${request.report.repeatIncidents} 次重复调用。` })
+        evidence.push({ code: 'repeatIncidents', label: '重复调用次数', value: request.report.repeatIncidents })
+      }
+      if (request.report.unverifiedChanges > 0) {
+        findings.push({ code: 'unverified-change', severity: 'critical', message: '存在未完成验证的代码变更。' })
+        evidence.push({ code: 'unverifiedChanges', label: '未验证变更数', value: request.report.unverifiedChanges })
+      }
+      if (request.report.failures > 0) {
+        findings.push({ code: 'tool-failure', severity: 'warning', message: `检测到 ${request.report.failures} 次工具失败。` })
+        evidence.push({ code: 'failures', label: '工具失败次数', value: request.report.failures })
+      }
+      const needsSecondReview = request.report.risk === 'high'
+        || request.report.verdict === 'stalled'
+        || request.report.unverifiedChanges > 0
+      return {
+        summary: findings.length === 0 ? '未发现需要升级处理的行为问题。' : `发现 ${findings.length} 项需要关注的行为问题。`,
+        findings,
+        confidence: 'high',
+        evidence,
+        needsSecondReview,
+      }
+    },
+  }
+}
+
+/**
+ * Run several independent reviewers and merge their conclusions by finding-code agreement.
+ * @param reviewers - separate reviewer implementations; at least one is required.
+ * @param request - sanitized review input shared with every reviewer.
+ * @returns the merged conclusion and the level of reviewer agreement.
+ */
+export async function reviewWithConsensus(
+  reviewers: readonly IndependentReviewer[],
+  request: IndependentReviewInput,
+): Promise<ReviewConsensus> {
+  if (reviewers.length === 0) throw new TypeError('at least one reviewer is required')
+  const conclusions = await Promise.all(reviewers.map(reviewer => reviewer.review(request)))
+  const signatures = conclusions.map(conclusion => conclusion.findings.map(finding => finding.code).sort().join(','))
+  const counts = new Map<string, number>()
+  for (const signature of signatures) counts.set(signature, (counts.get(signature) ?? 0) + 1)
+  const majoritySignature = [...counts.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? ''
+  const majority = conclusions[signatures.indexOf(majoritySignature)]!
+  const agreement = new Set(signatures).size === 1 ? 'unanimous' : (counts.get(majoritySignature)! > conclusions.length / 2 ? 'majority' : 'split')
+  return {
+    ...majority,
+    confidence: agreement === 'unanimous' ? majority.confidence : 'medium',
+    needsSecondReview: majority.needsSecondReview || agreement === 'split',
+    consensus: agreement,
+  }
 }
 
 function contextFor(text: string, ruleId: RuleId): ReturnType<typeof createUserMessage> {

@@ -83,6 +83,38 @@ describe('dsh-roast-office', () => {
     expect(fourth.additionalContexts).toBeUndefined()
   })
 
+  it('provides a deterministic reviewer fallback with evidence', async () => {
+    const reviewer = RoastOffice.createDeterministicReviewer()
+    const result = await reviewer.review({
+      requestId: 'review-1',
+      scope: 'turn',
+      trigger: 'manual',
+      report: RoastOffice.buildBehaviorReport({ calls: 3, failures: 1, repeatIncidents: 1, failureIncidents: 1, uniqueTools: 1, mutations: 1, verificationRuns: 0, unverifiedChanges: 1 }),
+      observations: [{ tool: 'read', succeeded: false, failureCode: 'TEST_ERROR' }],
+      reviewer: 'independent-agent',
+    })
+    expect(result.confidence).toBe('high')
+    expect(result.needsSecondReview).toBe(true)
+    expect(result.evidence.map(item => item.code)).toContain('unverifiedChanges')
+  })
+
+  it('marks disagreement when independent reviewers split', async () => {
+    const request = {
+      requestId: 'review-2', scope: 'turn' as const, trigger: 'manual' as const,
+      report: RoastOffice.buildBehaviorReport({ calls: 1, failures: 0, repeatIncidents: 0, failureIncidents: 0, uniqueTools: 1, mutations: 0, verificationRuns: 0, unverifiedChanges: 0 }),
+      observations: [], reviewer: 'independent-agent' as const,
+    }
+    const conclusion = (code: string): RoastOffice.IndependentReviewer => ({
+      async review() {
+        return { summary: code, findings: [{ code, severity: 'warning', message: code }], confidence: 'high', evidence: [], needsSecondReview: false }
+      },
+    })
+    const result = await RoastOffice.reviewWithConsensus([conclusion('a'), conclusion('b')], request)
+    expect(result.consensus).toBe('split')
+    expect(result.confidence).toBe('medium')
+    expect(result.needsSecondReview).toBe(true)
+  })
+
   it('requests an independent review when a threshold fires', async () => {
     const ctx = new Context()
     const requests: RoastOffice.ReviewRequest[] = []
@@ -157,6 +189,7 @@ describe('dsh-roast-office', () => {
       findings: [{ code: 'repeat-call' }],
       confidence: 'high',
       needsSecondReview: true,
+      consensus: 'single',
     })
     expect(results[0]?.evidence).toEqual([{ code: 'repeatIncidents', label: '重复调用次数', value: 1 }])
     expect(results[0]?.requestId).toMatch(/^review-/)
