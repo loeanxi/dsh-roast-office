@@ -88,6 +88,13 @@ export interface ReviewFinding {
   readonly message: string
 }
 
+/** A non-sensitive fact that supports a reviewer conclusion. */
+export interface ReviewEvidence {
+  readonly code: string
+  readonly label: string
+  readonly value: string | number
+}
+
 /** Result published after a separate reviewer Agent handles a request. */
 export interface ReviewResult {
   readonly requestId: string
@@ -95,6 +102,9 @@ export interface ReviewResult {
   readonly status: 'completed' | 'failed'
   readonly summary: string
   readonly findings: readonly ReviewFinding[]
+  readonly confidence: 'low' | 'medium' | 'high'
+  readonly evidence: readonly ReviewEvidence[]
+  readonly needsSecondReview: boolean
   readonly reviewer: 'independent-agent'
   readonly error?: string
 }
@@ -106,7 +116,7 @@ export interface IndependentReviewer {
    * @param request - request without raw tool arguments or file contents.
    * @returns the review summary and findings to publish to the UI.
    */
-  review(request: IndependentReviewInput): Promise<Pick<ReviewResult, 'summary' | 'findings'>>
+  review(request: IndependentReviewInput): Promise<Pick<ReviewResult, 'summary' | 'findings' | 'confidence' | 'evidence' | 'needsSecondReview'>>
 }
 
 declare module '@deepseek-ai/cordis' {
@@ -403,6 +413,9 @@ export function installIndependentReviewer(ctx: Context, reviewer: IndependentRe
         status: 'completed',
         summary: result.summary,
         findings: result.findings,
+        confidence: result.confidence,
+        evidence: result.evidence,
+        needsSecondReview: result.needsSecondReview,
         reviewer: 'independent-agent',
       })
     }).catch(error => {
@@ -412,6 +425,9 @@ export function installIndependentReviewer(ctx: Context, reviewer: IndependentRe
         status: 'failed',
         summary: '独立评审 Agent 未能完成评审。',
         findings: [],
+        confidence: 'low',
+        evidence: [],
+        needsSecondReview: true,
         reviewer: 'independent-agent',
         error: error instanceof Error ? error.message : String(error),
       })

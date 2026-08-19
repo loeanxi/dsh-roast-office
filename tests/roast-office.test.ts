@@ -136,7 +136,13 @@ describe('dsh-roast-office', () => {
         expect(request.reviewer).toBe('independent-agent')
         expect(request.observations[0]?.tool).toBe('read')
         expect('agent' in request).toBe(false)
-        return { summary: '需要复核', findings: [{ code: 'repeat-call', severity: 'warning', message: '重复读取。' }] }
+        return {
+          summary: '需要复核',
+          findings: [{ code: 'repeat-call', severity: 'warning', message: '重复读取。' }],
+          confidence: 'high',
+          evidence: [{ code: 'repeatIncidents', label: '重复调用次数', value: 1 }],
+          needsSecondReview: true,
+        }
       },
     })
     await ctx.plugin(RoastOffice, { autoReview: false, reportChannel: 'none' })
@@ -149,7 +155,10 @@ describe('dsh-roast-office', () => {
       reviewer: 'independent-agent',
       summary: '需要复核',
       findings: [{ code: 'repeat-call' }],
+      confidence: 'high',
+      needsSecondReview: true,
     })
+    expect(results[0]?.evidence).toEqual([{ code: 'repeatIncidents', label: '重复调用次数', value: 1 }])
     expect(results[0]?.requestId).toMatch(/^review-/)
   })
 
