@@ -43,11 +43,18 @@ It is observational only: it calls `next()` on the tool waterfall and returns th
     verificationTools: [test, lint, typecheck, build, check]
     verificationPaths: [src/**, packages/**, examples/**, scripts/**, '*.config.*', package.json, tsconfig*.json]
     historySize: 5
+    autoReview: true
+    reviewTriggers: [threshold, turn-end]
+    maxReviewObservations: 20
 ```
 
 `style` accepts `neutral`, `gentle`, or `roast`. `context` adds a plugin-sourced notice to the next model request; `console` writes the rendered finding to the context logger. The default configuration enables both channels.
 
 `reportChannel` accepts `console`, `event`, `both`, or `none`. The `event` option emits a structured `roast-office/report` event for UI, telemetry, or other plugins without requiring them to parse logger text. `mutationTools`, `verificationTools`, and `verificationPaths` accept exact names or `*` wildcards. `historySize` controls how many previous scores are retained for trend comparison.
+
+`roast-office/review-request` is the integration point for an independent Reviewer Agent. Automatic requests use `threshold` or `turn-end`; a Web UI can request a review by emitting `roast-office/request-review` with `scope: turn`, `selection`, or `session`. The event contains sanitized tool names, success flags, failure codes, and the deterministic report, not raw tool arguments or file contents. A consumer must dispatch the request to a separate read-only reviewer session and render its result outside the execution conversation.
+
+The plugin keeps the latest completed-turn snapshot in memory, so a manual request still works after the trajectory reaches idle. `selection` and `session` are protocol scopes for the Web consumer; this standalone package currently supplies the latest available snapshot and leaves selection/session retrieval to that consumer.
 
 The observer detects `repeat-call` when one Agent invokes the same tool with canonicalized identical arguments consecutively. It detects `failed-retry` when the same tool and failure code/message repeat consecutively. A mutation only enters the verification window when one of its path-like arguments matches `verificationPaths`; documentation-only paths such as `README.md` are ignored by default. `clean-finish` is emitted to the console when an agent becomes idle after at least one call and includes calls, failures, repeat incidents, failure retries, unique tools, mutations, verification runs, unverified changes, score, risk, and verdict.
 
@@ -71,7 +78,7 @@ Notices are append-only additions after the existing tool result and do not rewr
 
 ## Extension points
 
-The exported `canonicalize` function defines argument equality for the repeat rule. `buildBehaviorReport`, `BehaviorMetrics`, and `BehaviorReport` are the stable vocabulary for score consumers and future renderer registries. Consumers can subscribe to `roast-office/report` without importing a transport or UI type.
+The exported `canonicalize` function defines argument equality for the repeat rule. `buildBehaviorReport`, `BehaviorMetrics`, and `BehaviorReport` are the stable vocabulary for score consumers and future renderer registries. Consumers can subscribe to `roast-office/report` without importing a transport or UI type. Review consumers subscribe to `roast-office/review-request`; the `reviewer: 'independent-agent'` marker makes same-conversation self-review an invalid consumer implementation.
 
 ## Known Limitations and Deferred Work
 

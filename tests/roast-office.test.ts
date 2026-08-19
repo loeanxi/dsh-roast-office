@@ -83,6 +83,50 @@ describe('dsh-roast-office', () => {
     expect(fourth.additionalContexts).toBeUndefined()
   })
 
+  it('requests an independent review when a threshold fires', async () => {
+    const ctx = new Context()
+    const requests: RoastOffice.ReviewRequest[] = []
+    ctx.on('roast-office/review-request', request => { requests.push(request) })
+    await ctx.plugin(RoastOffice, { channels: ['context'], reportChannel: 'none' })
+    const agent = {} as Agent
+    await post(ctx, execution(agent, 'read', { path: 'README.md' }), success())
+    await post(ctx, execution(agent, 'read', { path: 'README.md' }), success())
+    await post(ctx, execution(agent, 'read', { path: 'README.md' }), success())
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({
+      scope: 'turn',
+      trigger: 'threshold',
+      reviewer: 'independent-agent',
+      report: { repeatIncidents: 1 },
+    })
+    expect(requests[0]?.observations).toHaveLength(3)
+  })
+
+  it('supports a manual independent review request', async () => {
+    const ctx = new Context()
+    const requests: RoastOffice.ReviewRequest[] = []
+    ctx.on('roast-office/review-request', request => { requests.push(request) })
+    await ctx.plugin(RoastOffice, { autoReview: false, reportChannel: 'none' })
+    const agent = {} as Agent
+    await post(ctx, execution(agent, 'read', { path: 'README.md' }), success())
+    ctx.emit(ctx as never, 'roast-office/request-review', { agent, scope: 'selection' })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({ scope: 'selection', trigger: 'manual', reviewer: 'independent-agent' })
+  })
+
+  it('supports a manual review after the observed turn becomes idle', async () => {
+    const ctx = new Context()
+    const requests: RoastOffice.ReviewRequest[] = []
+    ctx.on('roast-office/review-request', request => { requests.push(request) })
+    await ctx.plugin(RoastOffice, { autoReview: false, reportChannel: 'none' })
+    const agent = {} as Agent
+    await post(ctx, execution(agent, 'read', { path: 'README.md' }), success())
+    ctx.emit(ctx as never, 'agent/status', { agent, status: 'idle' })
+    ctx.emit(ctx as never, 'roast-office/request-review', { agent, scope: 'turn' })
+    expect(requests).toHaveLength(1)
+    expect(requests[0]).toMatchObject({ scope: 'turn', trigger: 'manual', report: { calls: 1 } })
+  })
+
   it('emits a failed-retry notice for the second identical failure', async () => {
     const ctx = new Context()
     await ctx.plugin(RoastOffice, { channels: ['context'], failureThreshold: 2 })

@@ -21,6 +21,12 @@ export type Channel = 'context' | 'console'
 /** Destination for the structured turn-end report. */
 export type ReportChannel = 'console' | 'event' | 'both' | 'none'
 
+/** Scope of an independent review request. */
+export type ReviewScope = 'turn' | 'selection' | 'session'
+
+/** Cause of an independent review request. */
+export type ReviewTrigger = 'threshold' | 'turn-end' | 'manual'
+
 /** Rules available in the plugin. */
 export type RuleId = 'repeat-call' | 'failed-retry' | 'clean-finish'
 
@@ -54,6 +60,23 @@ export interface BehaviorReport extends BehaviorMetrics {
   readonly verdict: 'excellent' | 'review' | 'stalled'
 }
 
+/** Sanitized observation supplied to an independent reviewer. */
+export interface ReviewObservation {
+  readonly tool: string
+  readonly succeeded: boolean
+  readonly failureCode?: string
+}
+
+/** Structured request for a reviewer Agent running outside the execution turn. */
+export interface ReviewRequest {
+  readonly agent: Agent
+  readonly scope: ReviewScope
+  readonly trigger: ReviewTrigger
+  readonly report: BehaviorReport
+  readonly observations: readonly ReviewObservation[]
+  readonly reviewer: 'independent-agent'
+}
+
 declare module '@deepseek-ai/cordis' {
   interface Events {
     /**
@@ -62,6 +85,18 @@ declare module '@deepseek-ai/cordis' {
      * @mode emit
      */
     'roast-office/report'(payload: { agent: Agent; report: BehaviorReport; text: string }): void
+    /**
+     * Requests an independent reviewer Agent to assess the execution trace.
+     * @param payload - the execution Agent, review scope, and trigger.
+     * @mode emit
+     */
+    'roast-office/request-review'(payload: { agent: Agent; scope: ReviewScope }): void
+    /**
+     * Emitted when review is requested automatically or manually.
+     * @param payload - sanitized evidence for a separate reviewer Agent.
+     * @mode emit
+     */
+    'roast-office/review-request'(payload: ReviewRequest): void
   }
 }
 
@@ -89,6 +124,12 @@ export interface Config {
   verificationPaths?: string[]
   /** Number of previous turn scores retained for trend comparison. */
   historySize?: number
+  /** Enable automatic independent review requests. */
+  autoReview?: boolean
+  /** Automatic review triggers; defaults to threshold and turn-end. */
+  reviewTriggers?: ReviewTrigger[]
+  /** Maximum sanitized tool observations included in one review request. */
+  maxReviewObservations?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -103,6 +144,9 @@ export const Config: z<Config> = z.object({
   verificationTools: z.array(z.string()).default(['test', 'lint', 'typecheck', 'build', 'check']),
   verificationPaths: z.array(z.string()).default(['src/**', 'packages/**', 'examples/**', 'scripts/**', '*.config.*', 'package.json', 'tsconfig*.json']),
   historySize: z.number().default(5),
+  autoReview: z.boolean().default(true),
+  reviewTriggers: z.array(z.union([z.const('threshold'), z.const('turn-end'), z.const('manual')])).default(['threshold', 'turn-end']),
+  maxReviewObservations: z.number().default(20),
 })
 
 /** A stable, machine-readable observation produced by a rule. */
@@ -127,6 +171,13 @@ interface AgentState {
   mutations: number
   verificationRuns: number
   verifiedSinceMutation: boolean
+  observations: ReviewObservation[]
+  reviewRequested: boolean
+}
+
+interface ReviewSnapshot {
+  readonly report: BehaviorReport
+  readonly observations: readonly ReviewObservation[]
 }
 
 const PLUGIN_SOURCE: MessageSource = { kind: 'plugin', plugin: 'roast-office' }
@@ -197,6 +248,8 @@ function stateFor(states: WeakMap<Agent, AgentState>, agent: Agent): AgentState 
     mutations: 0,
     verificationRuns: 0,
     verifiedSinceMutation: false,
+    observations: [],
+    reviewRequested: false,
   }
   states.set(agent, created)
   return created
@@ -264,6 +317,50 @@ function reportText(style: Style, report: BehaviorReport): string {
   return `${summary} ${joke}\n建议：检查相关测试和工作区后再提交。`
 }
 
+function reportFromState(state: AgentState): BehaviorReport {
+  return buildBehaviorReport({
+    calls: state.calls,
+    failures: state.failures,
+    repeatIncidents: state.repeatIncidents,
+    failureIncidents: state.failureIncidents,
+    uniqueTools: state.uniqueTools.size,
+    mutations: state.mutations,
+    verificationRuns: state.verificationRuns,
+    unverifiedChanges: state.mutations > 0 && !state.verifiedSinceMutation ? 1 : 0,
+  })
+}
+
+function emitReviewRequest(
+  ctx: Context,
+  agent: Agent,
+  state: AgentState,
+  scope: ReviewScope,
+  trigger: ReviewTrigger,
+  config: Required<Config>,
+): void {
+  emitReviewSnapshot(ctx, agent, {
+    report: reportFromState(state),
+    observations: state.observations.slice(-config.maxReviewObservations),
+  }, scope, trigger)
+}
+
+function emitReviewSnapshot(
+  ctx: Context,
+  agent: Agent,
+  snapshot: ReviewSnapshot,
+  scope: ReviewScope,
+  trigger: ReviewTrigger,
+): void {
+  ctx.emit(ctx as never, 'roast-office/review-request', {
+    agent,
+    scope,
+    trigger,
+    report: snapshot.report,
+    observations: snapshot.observations,
+    reviewer: 'independent-agent',
+  })
+}
+
 function contextFor(text: string, ruleId: RuleId): ReturnType<typeof createUserMessage> {
   return createUserMessage({
     content: [{ type: 'text', text }],
@@ -286,6 +383,12 @@ function observe(
 ): Finding | undefined {
   state.calls += 1
   state.uniqueTools.add(exec.name)
+  state.observations.push({
+    tool: exec.name,
+    succeeded: !result.isError,
+    ...(result.isError && result.error.info?.code !== undefined ? { failureCode: result.error.info.code } : {}),
+  })
+  if (state.observations.length > config.maxReviewObservations) state.observations.shift()
   if (matchesTool(exec.name, config.mutationTools) && needsVerification(exec.arguments, config.verificationPaths)) {
     state.mutations += 1
     state.verifiedSinceMutation = false
@@ -348,16 +451,38 @@ export function apply(ctx: Context, rawConfig: Config): void {
     verificationTools: rawConfig.verificationTools ?? ['test', 'lint', 'typecheck', 'build', 'check'],
     verificationPaths: rawConfig.verificationPaths ?? ['src/**', 'packages/**', 'examples/**', 'scripts/**', '*.config.*', 'package.json', 'tsconfig*.json'],
     historySize: validatePositiveInteger(rawConfig.historySize ?? 5, 'historySize'),
+    autoReview: rawConfig.autoReview ?? true,
+    reviewTriggers: rawConfig.reviewTriggers ?? ['threshold', 'turn-end'],
+    maxReviewObservations: validatePositiveInteger(rawConfig.maxReviewObservations ?? 20, 'maxReviewObservations'),
   }
   const states = new WeakMap<Agent, AgentState>()
   const history = new WeakMap<Agent, number[]>()
+  const lastReviews = new WeakMap<Agent, ReviewSnapshot>()
+
+  ctx.on('roast-office/request-review', ({ agent, scope }) => {
+    const state = states.get(agent)
+    if (state !== undefined && state.calls > 0) {
+      emitReviewRequest(ctx, agent, state, scope, 'manual', config)
+      return
+    }
+    const snapshot = lastReviews.get(agent)
+    if (snapshot !== undefined) emitReviewSnapshot(ctx, agent, snapshot, scope, 'manual')
+  })
 
   ctx.on('tools/post-execute', async (exec, result, next): Promise<PostToolDecision> => {
     const decision = await next()
     if (exec.agent === undefined) return decision
     const state = stateFor(states, exec.agent)
     const finding = observe(exec, result, state, config)
-    return finding === undefined ? decision : emit(ctx, finding, config, state, { agent: exec.agent, decision })
+    if (finding !== undefined) {
+      const nextDecision = emit(ctx, finding, config, state, { agent: exec.agent, decision })
+      if (config.autoReview && config.reviewTriggers.includes('threshold') && !state.reviewRequested) {
+        state.reviewRequested = true
+        emitReviewRequest(ctx, exec.agent, state, 'turn', 'threshold', config)
+      }
+      return nextDecision
+    }
+    return decision
   })
 
   ctx.on('agent/pre-step', ({ agent, messages }, next): Promise<PreStepDecision> => {
@@ -372,21 +497,23 @@ export function apply(ctx: Context, rawConfig: Config): void {
       states.delete(agent)
       return
     }
-    const report = buildBehaviorReport({
-      calls: state.calls,
-      failures: state.failures,
-      repeatIncidents: state.repeatIncidents,
-      failureIncidents: state.failureIncidents,
-      uniqueTools: state.uniqueTools.size,
-      mutations: state.mutations,
-      verificationRuns: state.verificationRuns,
-      unverifiedChanges: state.mutations > 0 && !state.verifiedSinceMutation ? 1 : 0,
-    })
+    const report = reportFromState(state)
     const scores = history.get(agent) ?? []
     const reportWithTrend = withTrend(report, scores.at(-1))
     scores.push(report.score)
     while (scores.length > config.historySize) scores.shift()
     history.set(agent, scores)
+    lastReviews.set(agent, {
+      report: reportWithTrend,
+      observations: state.observations.slice(-config.maxReviewObservations),
+    })
+    if (config.autoReview && config.reviewTriggers.includes('turn-end') && !state.reviewRequested) {
+      state.reviewRequested = true
+      emitReviewSnapshot(ctx, agent, {
+        report: reportWithTrend,
+        observations: state.observations.slice(-config.maxReviewObservations),
+      }, 'turn', 'turn-end')
+    }
     const text = reportText(config.style, reportWithTrend)
     if (config.reportChannel === 'console' || config.reportChannel === 'both') ctx.logger.info(text)
     if (config.reportChannel === 'event' || config.reportChannel === 'both') {
