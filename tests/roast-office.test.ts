@@ -21,6 +21,25 @@ async function post(ctx: Context, call: ToolExecution, result: ToolExecutionResu
 }
 
 describe('dsh-roast-office', () => {
+  it('scores behavior deterministically', () => {
+    expect(RoastOffice.buildBehaviorReport({
+      calls: 10,
+      failures: 2,
+      repeatIncidents: 1,
+      failureIncidents: 1,
+      uniqueTools: 4,
+    })).toEqual({
+      calls: 10,
+      failures: 2,
+      repeatIncidents: 1,
+      failureIncidents: 1,
+      uniqueTools: 4,
+      score: 59,
+      risk: 'high',
+      verdict: 'stalled',
+    })
+  })
+
   it('emits one repeat notice at the configured threshold', async () => {
     const ctx = new Context()
     await ctx.plugin(RoastOffice, { channels: ['context'], repeatThreshold: 3 })
@@ -52,5 +71,6 @@ describe('dsh-roast-office', () => {
     expect(result).toEqual({ kind: 'accept' })
     ctx.emit(ctx as never, 'agent/status', { agent, status: 'idle' })
     expect(info).toHaveBeenCalledWith(expect.stringContaining('clean-finish'))
+    expect(info).toHaveBeenCalledWith(expect.stringContaining('行为评分：100/100'))
   })
 })

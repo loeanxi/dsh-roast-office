@@ -1,6 +1,6 @@
 # dsh-roast-office
 
-`dsh-roast-office` observes Agent tool results and emits deterministic behavior findings with optional roast-style feedback. It never blocks, rewrites, delays, or retries a tool call. The package is a presentation layer over existing loop facts; `dsh-repeat-tool-reminder` remains the owner of repeat-call model guidance.
+`dsh-roast-office` observes Agent tool results and emits deterministic behavior findings plus a turn-level behavior report with optional roast-style feedback. It never blocks, rewrites, delays, or retries a tool call. The package is a presentation layer over existing loop facts; `dsh-repeat-tool-reminder` remains the owner of repeat-call model guidance.
 
 This repository is an independent dsh plugin project. It targets published dsh package APIs instead of importing monorepo workspace paths.
 
@@ -8,7 +8,7 @@ This repository is an independent dsh plugin project. It targets published dsh p
 
 ```yaml
 - id: roast-office
-  name: '@deepseek-ai/dsh-roast-office'
+  name: '@dsh-plugins/roast-office'
   config:
     style: roast
     channels: [context, console]
@@ -20,9 +20,9 @@ This repository is an independent dsh plugin project. It targets published dsh p
 
 `style` accepts `neutral`, `gentle`, or `roast`. `context` adds a plugin-sourced notice to the next model request; `console` writes the rendered finding to the context logger. The default configuration enables both channels.
 
-The observer detects `repeat-call` when one Agent invokes the same tool with canonicalized identical arguments consecutively. It detects `failed-retry` when the same tool and failure code/message repeat consecutively. `clean-finish` is emitted to the console when an agent becomes idle after at least one call and the finding limit has not been reached.
+The observer detects `repeat-call` when one Agent invokes the same tool with canonicalized identical arguments consecutively. It detects `failed-retry` when the same tool and failure code/message repeat consecutively. `clean-finish` is emitted to the console when an agent becomes idle after at least one call and includes calls, failures, repeat incidents, failure retries, unique tools, score, risk, and verdict.
 
-Finding facts are deterministic and contain only tool names, counts, and failure summaries needed by the rule. The roast renderer targets behavior, never the user's identity or ability. Tool results and policy decisions pass through unchanged.
+Finding facts and reports are deterministic and contain only tool names, counts, and failure summaries needed by the rule. The score starts at 100, subtracts 20 per repeat incident, 15 per failure-retry incident, and up to 30 for the failure rate. Scores from 85 are `low` risk, scores from 60 are `medium` risk, and lower scores are `high` risk. The roast renderer targets behavior, never the user's identity or ability. Tool results and policy decisions pass through unchanged.
 
 ## Model Experience
 
@@ -42,11 +42,11 @@ Notices are append-only additions after the existing tool result and do not rewr
 
 ## Extension points
 
-The exported `canonicalize` function defines argument equality for the repeat rule. `Finding` and `RuleId` are the stable vocabulary for future rule and renderer registries. A future UI consumer can subscribe to structured findings without importing a transport or UI type; the first version exposes rendered context and logger output only.
+The exported `canonicalize` function defines argument equality for the repeat rule. `buildBehaviorReport`, `BehaviorMetrics`, and `BehaviorReport` are the stable vocabulary for score consumers and future renderer registries. A future UI consumer can subscribe to structured findings and reports without importing a transport or UI type; this version exposes rendered context and logger output only.
 
 ## Known Limitations and Deferred Work
 
-- The first version does not persist structured findings as a new session event.
+- The second version does not persist structured findings or reports as a new session event.
 - `clean-finish` is logger-only because the status event does not carry a post-turn decision context.
 - Failure matching includes the full normalized error message, so similar failures with different dynamic text do not coalesce.
 - Search-without-progress, scope drift, and unverified-change rules remain deferred until their evidence windows are defined.
