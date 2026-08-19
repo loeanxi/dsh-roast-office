@@ -760,11 +760,25 @@ export function apply(ctx: Context, rawConfig: Config): void {
   const lastReviews = new WeakMap<Agent, ReviewSnapshot>()
   let nextReviewId = 0
   const fallbackReviewer = createDeterministicReviewer()
-  ctx.inject(['subagents'], (subagentCtx) => {
-    const subagents = (subagentCtx as unknown as { subagents: SubagentServiceLike }).subagents
-    const dispose = installIndependentReviewer(ctx, createSubagentReviewer(subagents, config.reviewerProvider))
-    subagentCtx.effect(() => dispose, 'roast-office: independent reviewer')
-  })
+  let reviewerDisposer: (() => void) | undefined
+  const tryMountSubagentReviewer = (): void => {
+    if (reviewerDisposer !== undefined) return
+    let subagents: SubagentServiceLike | undefined
+    try {
+      subagents = (ctx as unknown as { get(name: string): unknown }).get('subagents') as SubagentServiceLike | undefined
+    } catch {
+      return
+    }
+    if (subagents === undefined) return
+    reviewerDisposer = installIndependentReviewer(ctx, createSubagentReviewer(subagents, config.reviewerProvider))
+    ctx.effect(() => () => {
+      const dispose = reviewerDisposer
+      reviewerDisposer = undefined
+      dispose?.()
+    }, 'roast-office: independent reviewer')
+  }
+  tryMountSubagentReviewer()
+  ctx.on('subagent/provider-added' as never, tryMountSubagentReviewer as never)
 
   const requestId = (): string => `review-${++nextReviewId}`
 
