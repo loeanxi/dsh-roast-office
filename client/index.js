@@ -1,4 +1,7 @@
-import React from 'react'
+window.__ModuleLoader__.load({
+  id: '@dsh-plugins/roast-office',
+  factory: (require) => {
+    const React = require('react')
 
 const reviewDefinition = {
   kind: 'roast-office-review',
@@ -58,9 +61,9 @@ function ReviewDock({ inputActions, input }) {
   }, '主动评审')
 }
 
-export const inject = ['slots', 'conversationEvents']
+const inject = ['slots', 'conversationEvents']
 
-export function apply(ctx) {
+function apply(ctx) {
   ctx.conversationEvents.register(reviewDefinition)
   ctx.slots.inject('conversation.chat.node', () => ctx.slots.register({
     name: 'conversation.chat.node', key: 'roast-office-review', order: 40,
@@ -69,3 +72,10 @@ export function apply(ctx) {
     name: 'conversation.input.dock', id: 'roast-office-review', order: 30,
   }, ReviewDock))
 }
+
+    const module = { exports: {} }
+    module.exports.inject = inject
+    module.exports.apply = apply
+    return module.exports
+  },
+})

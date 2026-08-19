@@ -195,18 +195,6 @@ describe('dsh-roast-office', () => {
     expect(results[0]?.requestId).toMatch(/^review-/)
   })
 
-  it('mirrors review lifecycle to the owning session without exposing the Agent object', async () => {
-    const ctx = new Context()
-    const events: Array<{ type: string; data: unknown }> = []
-    const agent = { session: { append: (type: string, data: unknown) => { events.push({ type, data }) } } } as unknown as Agent
-    await ctx.plugin(RoastOffice, { autoReview: false, reportChannel: 'none' })
-    await post(ctx, execution(agent, 'read', { path: 'README.md' }), success())
-    ctx.emit(ctx as never, 'roast-office/request-review', { agent, scope: 'turn' })
-    expect(events.map(event => event.type)).toEqual(['roast-office/review-request'])
-    const request = events[0]?.data as Record<string, unknown>
-    expect(request).not.toHaveProperty('agent')
-    expect(request).toMatchObject({ scope: 'turn', reviewer: 'independent-agent' })
-  })
 
   it('emits a failed-retry notice for the second identical failure', async () => {
     const ctx = new Context()

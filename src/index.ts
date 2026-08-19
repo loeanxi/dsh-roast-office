@@ -134,20 +134,6 @@ export interface IndependentReviewer {
   review(request: IndependentReviewInput): Promise<ReviewConclusion>
 }
 
-interface SessionAppender {
-  append(type: string, data: unknown): unknown
-}
-
-function appendReviewSessionEvent(ctx: Context, agent: Agent, type: string, data: unknown): void {
-  const session = (agent as unknown as { session?: SessionAppender }).session
-  if (session === undefined) return
-  try {
-    session.append(type, data)
-  } catch (error) {
-    ctx.logger.warn(`roast-office: could not append ${type} session event: ${String(error)}`)
-  }
-}
-
 declare module '@deepseek-ai/cordis' {
   interface Events {
     /**
@@ -424,14 +410,6 @@ function emitReviewSnapshot(
     observations: snapshot.observations,
     reviewer: 'independent-agent',
   }
-  appendReviewSessionEvent(ctx, agent, 'roast-office/review-request', {
-    requestId: request.requestId,
-    scope: request.scope,
-    trigger: request.trigger,
-    report: request.report,
-    observations: request.observations,
-    reviewer: request.reviewer,
-  })
   ctx.emit(ctx as never, 'roast-office/review-request', request)
 }
 
@@ -457,33 +435,10 @@ export function installIndependentReviewer(ctx: Context, reviewer: IndependentRe
         consensus: 'single',
         reviewer: 'independent-agent',
       })
-      appendReviewSessionEvent(ctx, request.agent, 'roast-office/review-result', {
-        requestId: request.requestId,
-        status: 'completed',
-        summary: result.summary,
-        findings: result.findings,
-        confidence: result.confidence,
-        evidence: result.evidence,
-        needsSecondReview: result.needsSecondReview,
-        consensus: 'single',
-        reviewer: 'independent-agent',
-      })
     }).catch(error => {
       ctx.emit(ctx as never, 'roast-office/review-result', {
         requestId: request.requestId,
         agent: request.agent,
-        status: 'failed',
-        summary: '独立评审 Agent 未能完成评审。',
-        findings: [],
-        confidence: 'low',
-        evidence: [],
-        needsSecondReview: true,
-        consensus: 'single',
-        reviewer: 'independent-agent',
-        error: error instanceof Error ? error.message : String(error),
-      })
-      appendReviewSessionEvent(ctx, request.agent, 'roast-office/review-result', {
-        requestId: request.requestId,
         status: 'failed',
         summary: '独立评审 Agent 未能完成评审。',
         findings: [],
@@ -664,15 +619,9 @@ export function apply(ctx: Context, rawConfig: Config): void {
 
   const requestId = (): string => `review-${++nextReviewId}`
 
-  const maybeCommands = (() => {
-    try {
-      return (ctx as unknown as { get(name: string): unknown }).get('commands') as { register?: (definition: unknown) => unknown } | undefined
-    } catch {
-      return undefined
-    }
-  })()
-  if (maybeCommands?.register !== undefined) {
-    const disposer = maybeCommands.register({
+  ctx.inject(['commands'], (commandCtx) => {
+    const commands = (commandCtx as unknown as { commands: { register(definition: unknown): () => void } }).commands
+    const dispose = commands.register({
       name: 'review',
       description: 'request an independent roast-office review',
       input: { hint: 'turn | selection | session' },
@@ -685,8 +634,8 @@ export function apply(ctx: Context, rawConfig: Config): void {
         return { kind: 'success', text: '已提交独立评审请求。' }
       },
     })
-    if (typeof disposer === 'function') ctx.effect(() => disposer as () => void, 'roast-office: review command')
-  }
+    commandCtx.effect(() => dispose, 'roast-office: review command')
+  })
 
   ctx.on('roast-office/request-review', ({ agent, scope }) => {
     const state = states.get(agent)

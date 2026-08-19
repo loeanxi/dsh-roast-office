@@ -60,7 +60,7 @@ The host can connect a separate reviewer session with `installIndependentReviewe
 
 `createDeterministicReviewer()` provides a model-free fallback based on the report and sanitized observations. `reviewWithConsensus()` can run multiple independent reviewers and marks the result `unanimous`, `majority`, or `split`; disagreement lowers confidence and requires a second review.
 
-When the host Agent exposes its Session append API, request and result payloads are mirrored as log-only `roast-office/review-request` and `roast-office/review-result` events. These payloads never include the Agent object, raw tool arguments, or file contents, so a future dsh Web adapter can replay the review card without coupling the plugin to dsh's internal runtime.
+The standalone plugin does not append unknown event types to dsh Session logs: doing so would make older dsh versions reject a session during replay. A dsh-specific adapter may persist the protocol after declaring its event types and compatibility policy; the core plugin remains usable by CLI, headless, and other hosts without modifying their session format.
 
 The observer detects `repeat-call` when one Agent invokes the same tool with canonicalized identical arguments consecutively. It detects `failed-retry` when the same tool and failure code/message repeat consecutively. A mutation only enters the verification window when one of its path-like arguments matches `verificationPaths`; documentation-only paths such as `README.md` are ignored by default. `clean-finish` is emitted to the console when an agent becomes idle after at least one call and includes calls, failures, repeat incidents, failure retries, unique tools, mutations, verification runs, unverified changes, score, risk, and verdict.
 
