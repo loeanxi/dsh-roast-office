@@ -1,0 +1,38 @@
+{
+  "name": "@dsh-plugins/roast-office",
+  "version": "0.1.0",
+  "description": "Agent behavior commentator with deterministic roast-style feedback",
+  "type": "module",
+  "main": "lib/src/index.js",
+  "types": "lib/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/src/index.d.ts",
+      "default": "./lib/src/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "MIT",
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "*",
+    "@deepseek-ai/dsh-agent": "*",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-tools": "*",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "latest",
+    "@deepseek-ai/cordis-plugin-include": "^1.0.6",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.2",
+    "@deepseek-ai/dsh-agent": "latest",
+    "@deepseek-ai/dsh-llm": "latest",
+    "@deepseek-ai/dsh-tools": "latest",
+    "@deepseek-ai/schemastery": "latest",
+    "typescript": "^5.8.0",
+    "vitest": "^3.2.0"
+  }
+}
