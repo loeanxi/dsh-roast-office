@@ -251,7 +251,7 @@ function withTrend(report: BehaviorReport, previousScore: number | undefined): B
 function reportText(style: Style, report: BehaviorReport): string {
   const summary = `[吐槽办·clean-finish] 行为评分：${report.score}/100（${report.verdict}）\n`
     + `工具调用：${report.calls} 次；失败：${report.failures} 次；重复事件：${report.repeatIncidents} 次；失败重试：${report.failureIncidents} 次；使用工具：${report.uniqueTools} 种。\n`
-    + `工作区改动：${report.mutations} 次；验证运行：${report.verificationRuns} 次；未验证改动：${report.unverifiedChanges} 次。\n`
+    + `工作区改动：${report.mutations} 次；成功验证：${report.verificationRuns} 次；未验证改动：${report.unverifiedChanges} 次。\n`
     + `稳定性：${report.breakdown.stability}；完整性：${report.breakdown.completeness}；效率：${report.breakdown.efficiency}（${report.efficiencyStatus}）；收尾：${report.breakdown.closure}。\n`
     + `风险等级：${report.risk}；趋势：${report.trend}。`
   if (style === 'neutral') return summary + ' 建议：检查相关测试和工作区后再提交。'
@@ -289,7 +289,7 @@ function observe(
   if (matchesTool(exec.name, config.mutationTools) && needsVerification(exec.arguments, config.verificationPaths)) {
     state.mutations += 1
     state.verifiedSinceMutation = false
-  } else if (matchesTool(exec.name, config.verificationTools)) {
+  } else if (!result.isError && matchesTool(exec.name, config.verificationTools)) {
     state.verificationRuns += 1
     if (state.mutations > 0) state.verifiedSinceMutation = true
   }

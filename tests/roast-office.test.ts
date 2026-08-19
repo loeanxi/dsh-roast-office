@@ -191,6 +191,27 @@ describe('dsh-roast-office', () => {
     })
   })
 
+  it('keeps a failed verification unverified', async () => {
+    const ctx = new Context()
+    const reports: RoastOffice.BehaviorReport[] = []
+    ctx.on('roast-office/report', ({ report }) => { reports.push(report) })
+    await ctx.plugin(RoastOffice, {
+      channels: ['context'],
+      reportChannel: 'event',
+      mutationTools: ['write'],
+      verificationTools: ['test'],
+    })
+    const agent = {} as Agent
+    await post(ctx, execution(agent, 'write', { path: 'src/index.ts' }), success())
+    await post(ctx, execution(agent, 'test', { scope: 'unit' }), failure('test failed'))
+    ctx.emit(ctx as never, 'agent/status', { agent, status: 'idle' })
+    expect(reports[0]).toMatchObject({
+      mutations: 1,
+      verificationRuns: 0,
+      unverifiedChanges: 1,
+    })
+  })
+
   it('ignores documentation-only mutations for verification completeness', async () => {
     const ctx = new Context()
     const reports: RoastOffice.BehaviorReport[] = []
