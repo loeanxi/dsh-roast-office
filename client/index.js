@@ -9,9 +9,19 @@ const reviewDefinition = {
   match(event) {
     if (event.type === 'roast-office/review-request') return { id: String(event.data.requestId), role: 'start' }
     if (event.type === 'roast-office/review-result') return { id: String(event.data.requestId), role: 'update' }
+    if (event.type === 'command/done' && event.data.kind === 'success' && typeof event.data.text === 'string' && event.data.text.startsWith('ROAST_OFFICE_REVIEW:')) {
+      try {
+        const payload = JSON.parse(event.data.text.slice('ROAST_OFFICE_REVIEW:'.length))
+        return { id: String(payload.request?.requestId ?? `command-${event.data.commandId}`), role: 'start' }
+      } catch { return null }
+    }
     return null
   },
   start(_context, match) {
+    if (match.event.type === 'command/done') {
+      const payload = JSON.parse(match.event.data.text.slice('ROAST_OFFICE_REVIEW:'.length))
+      return payload
+    }
     return { request: match.event.data, result: undefined }
   },
   update(context, match) {

@@ -616,6 +616,7 @@ export function apply(ctx: Context, rawConfig: Config): void {
   const history = new WeakMap<Agent, number[]>()
   const lastReviews = new WeakMap<Agent, ReviewSnapshot>()
   let nextReviewId = 0
+  const fallbackReviewer = createDeterministicReviewer()
 
   const requestId = (): string => `review-${++nextReviewId}`
 
@@ -626,12 +627,32 @@ export function apply(ctx: Context, rawConfig: Config): void {
       description: 'request an independent roast-office review',
       input: { hint: 'turn | selection | session' },
       recordInput: false,
-      handler: (invocation: { agent: Agent; rawInput: string }): { kind: 'success'; text: string } => {
+      handler: async (invocation: { agent: Agent; rawInput: string }): Promise<{ kind: 'success'; text: string }> => {
         const scope = invocation.rawInput.trim() === 'session' || invocation.rawInput.trim() === 'selection'
           ? invocation.rawInput.trim() as ReviewScope
           : 'turn'
-        ctx.emit(ctx as never, 'roast-office/request-review', { agent: invocation.agent, scope })
-        return { kind: 'success', text: '已提交独立评审请求。' }
+        const state = states.get(invocation.agent)
+        const snapshot = state !== undefined && state.calls > 0
+          ? { report: reportFromState(state), observations: state.observations.slice(-config.maxReviewObservations) }
+          : lastReviews.get(invocation.agent)
+        if (snapshot === undefined) return { kind: 'success', text: 'ROAST_OFFICE_REVIEW:暂无可评审的轨迹。' }
+        const requestIdValue = requestId()
+        const request: ReviewRequest = {
+          agent: invocation.agent,
+          requestId: requestIdValue,
+          scope,
+          trigger: 'manual',
+          report: snapshot.report,
+          observations: snapshot.observations,
+          reviewer: 'independent-agent',
+        }
+        ctx.emit(ctx as never, 'roast-office/review-request', request)
+        const { agent: _agent, ...reviewInput } = request
+        const result = await fallbackReviewer.review(reviewInput)
+        return {
+          kind: 'success',
+          text: `ROAST_OFFICE_REVIEW:${JSON.stringify({ request: { requestId: requestIdValue, scope, report: snapshot.report }, result: { status: 'completed', ...result, consensus: 'single', reviewer: 'deterministic-fallback' } })}`,
+        }
       },
     })
     commandCtx.effect(() => dispose, 'roast-office: review command')
