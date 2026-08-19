@@ -18,8 +18,52 @@ export type Style = 'neutral' | 'gentle' | 'roast'
 /** Output destination for a finding. */
 export type Channel = 'context' | 'console'
 
-/** Rules available in the first version. */
+/** Destination for the structured turn-end report. */
+export type ReportChannel = 'console' | 'event' | 'both' | 'none'
+
+/** Rules available in the plugin. */
 export type RuleId = 'repeat-call' | 'failed-retry' | 'clean-finish'
+
+/** Stable behavior metrics collected for one Agent turn. */
+export interface BehaviorMetrics {
+  readonly calls: number
+  readonly failures: number
+  readonly repeatIncidents: number
+  readonly failureIncidents: number
+  readonly uniqueTools: number
+  readonly mutations: number
+  readonly verificationRuns: number
+  readonly unverifiedChanges: number
+}
+
+/** Scores for the independent behavior dimensions shown in a report. */
+export interface BehaviorBreakdown {
+  readonly stability: number
+  readonly completeness: number
+  readonly efficiency: number
+  readonly closure: number
+}
+
+/** Deterministic turn-level behavior report. */
+export interface BehaviorReport extends BehaviorMetrics {
+  readonly breakdown: BehaviorBreakdown
+  readonly efficiencyStatus: 'normal' | 'watch' | 'stuck'
+  readonly trend: 'first-turn' | 'improving' | 'stable' | 'declining'
+  readonly score: number
+  readonly risk: 'low' | 'medium' | 'high'
+  readonly verdict: 'excellent' | 'review' | 'stalled'
+}
+
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * Emitted once when the observed Agent becomes idle and reporting is enabled.
+     * @param payload - the Agent, deterministic report, and rendered text.
+     * @mode emit
+     */
+    'roast-office/report'(payload: { agent: Agent; report: BehaviorReport; text: string }): void
+  }
+}
 
 /** Plugin configuration. */
 export interface Config {
@@ -35,6 +79,16 @@ export interface Config {
   maxFindingsPerTurn?: number
   /** Enable the turn-end summary finding. */
   cleanFinish?: boolean
+  /** Destination for the structured turn-end report; defaults to `console`. */
+  reportChannel?: ReportChannel
+  /** Tool names treated as workspace mutations. */
+  mutationTools?: string[]
+  /** Tool names treated as verification runs. */
+  verificationTools?: string[]
+  /** Paths whose mutations require a verification run; defaults to source and config paths. */
+  verificationPaths?: string[]
+  /** Number of previous turn scores retained for trend comparison. */
+  historySize?: number
 }
 
 export const Config: z<Config> = z.object({
@@ -44,6 +98,11 @@ export const Config: z<Config> = z.object({
   failureThreshold: z.number().default(2),
   maxFindingsPerTurn: z.number().default(3),
   cleanFinish: z.boolean().default(true),
+  reportChannel: z.union([z.const('console'), z.const('event'), z.const('both'), z.const('none')]).default('console'),
+  mutationTools: z.array(z.string()).default(['write', 'edit', 'apply_patch', 'str_replace_editor']),
+  verificationTools: z.array(z.string()).default(['test', 'lint', 'typecheck', 'build', 'check']),
+  verificationPaths: z.array(z.string()).default(['src/**', 'packages/**', 'examples/**', 'scripts/**', '*.config.*', 'package.json', 'tsconfig*.json']),
+  historySize: z.number().default(5),
 })
 
 /** A stable, machine-readable observation produced by a rule. */
@@ -62,6 +121,12 @@ interface AgentState {
   repeatedCalls: number
   lastFailureKey?: string
   repeatedFailures: number
+  repeatIncidents: number
+  failureIncidents: number
+  uniqueTools: Set<string>
+  mutations: number
+  verificationRuns: number
+  verifiedSinceMutation: boolean
 }
 
 const PLUGIN_SOURCE: MessageSource = { kind: 'plugin', plugin: 'roast-office' }
@@ -82,6 +147,36 @@ export function canonicalize(value: unknown): string {
   return JSON.stringify(sortJson(value))
 }
 
+function matchesTool(name: string, patterns: readonly string[]): boolean {
+  return patterns.some(pattern => {
+    const escaped = pattern.replace(/[|\\{}()[\]^$+?.]/g, String.raw`\\$&`)
+    return new RegExp(`^${escaped.replaceAll('*', '.*')}$`).test(name)
+  })
+}
+
+function matchesPath(path: string, patterns: readonly string[]): boolean {
+  const normalized = path.replaceAll('\\', '/')
+  return patterns.some(pattern => {
+    const escaped = pattern.replace(/[|\\{}()[\]^$+?.]/g, String.raw`\\$&`)
+    return new RegExp(`^${escaped.replaceAll('*', '.*')}$`).test(normalized)
+  })
+}
+
+function pathsFrom(value: unknown): string[] {
+  if (typeof value === 'string') return [value]
+  if (Array.isArray(value)) return value.flatMap(pathsFrom)
+  if (value === null || typeof value !== 'object') return []
+  const record = value as Record<string, unknown>
+  return Object.entries(record)
+    .filter(([key]) => ['path', 'file', 'filePath', 'paths', 'files'].includes(key))
+    .flatMap(([, entry]) => pathsFrom(entry))
+}
+
+function needsVerification(args: unknown, patterns: readonly string[]): boolean {
+  const paths = pathsFrom(args)
+  return paths.length === 0 || paths.some(path => matchesPath(path, patterns))
+}
+
 function validatePositiveInteger(value: number, field: string): number {
   if (!Number.isInteger(value) || value < 1) throw new Error(`roast-office: ${field} must be a positive integer`)
   return value
@@ -90,7 +185,19 @@ function validatePositiveInteger(value: number, field: string): number {
 function stateFor(states: WeakMap<Agent, AgentState>, agent: Agent): AgentState {
   const current = states.get(agent)
   if (current !== undefined) return current
-  const created: AgentState = { calls: 0, failures: 0, findings: 0, repeatedCalls: 0, repeatedFailures: 0 }
+  const created: AgentState = {
+    calls: 0,
+    failures: 0,
+    findings: 0,
+    repeatedCalls: 0,
+    repeatedFailures: 0,
+    repeatIncidents: 0,
+    failureIncidents: 0,
+    uniqueTools: new Set(),
+    mutations: 0,
+    verificationRuns: 0,
+    verifiedSinceMutation: false,
+  }
   states.set(agent, created)
   return created
 }
@@ -110,6 +217,51 @@ function roast(style: Style, finding: Finding): string {
       ? '这不是坚持，这是给同一个错误刷存在感。'
       : '现场秩序良好，暂未发现需要传唤的工具。'
   return `[吐槽办·${ruleId}] ${detail} ${joke}\n建议：${recommendation}`
+}
+
+/** Build a deterministic score from turn metrics without model judgment. */
+export function buildBehaviorReport(metrics: BehaviorMetrics): BehaviorReport {
+  const failureRatePenalty = metrics.calls === 0
+    ? 0
+    : Math.min(30, Math.round((metrics.failures / metrics.calls) * 30))
+  const breakdown: BehaviorBreakdown = {
+    stability: Math.max(0, 100 - metrics.repeatIncidents * 20 - metrics.failureIncidents * 15 - failureRatePenalty),
+    completeness: Math.max(0, 100 - metrics.unverifiedChanges * 20),
+    efficiency: Math.max(0, 100 - Math.max(0, metrics.calls - metrics.uniqueTools * 2) * 5),
+    closure: Math.max(0, 100 - metrics.failures * 10 - metrics.unverifiedChanges * 10),
+  }
+  const efficiencyStatus = breakdown.efficiency >= 85 ? 'normal' : breakdown.efficiency >= 60 ? 'watch' : 'stuck'
+  const score = Math.round((breakdown.stability + breakdown.completeness + breakdown.efficiency + breakdown.closure) / 4)
+  const risk = score >= 85 ? 'low' : score >= 60 ? 'medium' : 'high'
+  const verdict = score >= 85 ? 'excellent' : score >= 60 ? 'review' : 'stalled'
+  return { ...metrics, breakdown, efficiencyStatus, trend: 'first-turn', score, risk, verdict }
+}
+
+function withTrend(report: BehaviorReport, previousScore: number | undefined): BehaviorReport {
+  const trend = previousScore === undefined
+    ? 'first-turn'
+    : report.score > previousScore
+      ? 'improving'
+      : report.score < previousScore
+        ? 'declining'
+        : 'stable'
+  return { ...report, trend }
+}
+
+function reportText(style: Style, report: BehaviorReport): string {
+  const summary = `[吐槽办·clean-finish] 行为评分：${report.score}/100（${report.verdict}）\n`
+    + `工具调用：${report.calls} 次；失败：${report.failures} 次；重复事件：${report.repeatIncidents} 次；失败重试：${report.failureIncidents} 次；使用工具：${report.uniqueTools} 种。\n`
+    + `工作区改动：${report.mutations} 次；成功验证：${report.verificationRuns} 次；未验证改动：${report.unverifiedChanges} 次。\n`
+    + `稳定性：${report.breakdown.stability}；完整性：${report.breakdown.completeness}；效率：${report.breakdown.efficiency}（${report.efficiencyStatus}）；收尾：${report.breakdown.closure}。\n`
+    + `风险等级：${report.risk}；趋势：${report.trend}。`
+  if (style === 'neutral') return summary + ' 建议：检查相关测试和工作区后再提交。'
+  if (style === 'gentle') return summary + ' 可以再确认一次测试和工作区状态。'
+  const joke = report.verdict === 'excellent'
+    ? '本回合秩序良好，吐槽办暂不立案。'
+    : report.verdict === 'review'
+      ? '证据链还有几页没盖章，先别急着宣布胜利。'
+      : '这回合的进展条，正在申请失踪人口认定。'
+  return `${summary} ${joke}\n建议：检查相关测试和工作区后再提交。`
 }
 
 function contextFor(text: string, ruleId: RuleId): ReturnType<typeof createUserMessage> {
@@ -133,6 +285,14 @@ function observe(
   config: Required<Config>,
 ): Finding | undefined {
   state.calls += 1
+  state.uniqueTools.add(exec.name)
+  if (matchesTool(exec.name, config.mutationTools) && needsVerification(exec.arguments, config.verificationPaths)) {
+    state.mutations += 1
+    state.verifiedSinceMutation = false
+  } else if (!result.isError && matchesTool(exec.name, config.verificationTools)) {
+    state.verificationRuns += 1
+    if (state.mutations > 0) state.verifiedSinceMutation = true
+  }
   const callKey = JSON.stringify([exec.name, canonicalize(exec.arguments)])
   state.repeatedCalls = state.lastCallKey === callKey ? state.repeatedCalls + 1 : 1
   state.lastCallKey = callKey
@@ -146,10 +306,12 @@ function observe(
     state.repeatedFailures = state.lastFailureKey === failureKey ? state.repeatedFailures + 1 : 1
     state.lastFailureKey = failureKey
     if (state.repeatedFailures === config.failureThreshold) {
+      state.failureIncidents += 1
       failureFinding = { ruleId: 'failed-retry', facts: { tool: exec.name, count: state.repeatedFailures }, recommendation: '检查错误原因，改变参数或行动路径后再重试。' }
     }
   }
   if (state.repeatedCalls === config.repeatThreshold) {
+    state.repeatIncidents += 1
     return { ruleId: 'repeat-call', facts: { tool: exec.name, count: state.repeatedCalls }, recommendation: '重新阅读最近一次结果，或更换验证路径。' }
   }
   return failureFinding
@@ -181,8 +343,14 @@ export function apply(ctx: Context, rawConfig: Config): void {
     failureThreshold: validatePositiveInteger(rawConfig.failureThreshold ?? 2, 'failureThreshold'),
     maxFindingsPerTurn: validatePositiveInteger(rawConfig.maxFindingsPerTurn ?? 3, 'maxFindingsPerTurn'),
     cleanFinish: rawConfig.cleanFinish ?? true,
+    reportChannel: rawConfig.reportChannel ?? 'console',
+    mutationTools: rawConfig.mutationTools ?? ['write', 'edit', 'apply_patch', 'str_replace_editor'],
+    verificationTools: rawConfig.verificationTools ?? ['test', 'lint', 'typecheck', 'build', 'check'],
+    verificationPaths: rawConfig.verificationPaths ?? ['src/**', 'packages/**', 'examples/**', 'scripts/**', '*.config.*', 'package.json', 'tsconfig*.json'],
+    historySize: validatePositiveInteger(rawConfig.historySize ?? 5, 'historySize'),
   }
   const states = new WeakMap<Agent, AgentState>()
+  const history = new WeakMap<Agent, number[]>()
 
   ctx.on('tools/post-execute', async (exec, result, next): Promise<PostToolDecision> => {
     const decision = await next()
@@ -200,13 +368,30 @@ export function apply(ctx: Context, rawConfig: Config): void {
   ctx.on('agent/status', ({ agent, status }) => {
     if (status !== 'idle') return
     const state = states.get(agent)
-    if (state === undefined || !config.cleanFinish || state.calls === 0 || state.findings >= config.maxFindingsPerTurn) {
+    if (state === undefined || !config.cleanFinish || state.calls === 0) {
       states.delete(agent)
       return
     }
-    const finding: Finding = { ruleId: 'clean-finish', facts: { calls: state.calls, failures: state.failures }, recommendation: '检查相关测试和工作区后再提交。' }
-    const text = roast(config.style, finding)
-    if (config.channels.includes('console')) ctx.logger.info(text)
+    const report = buildBehaviorReport({
+      calls: state.calls,
+      failures: state.failures,
+      repeatIncidents: state.repeatIncidents,
+      failureIncidents: state.failureIncidents,
+      uniqueTools: state.uniqueTools.size,
+      mutations: state.mutations,
+      verificationRuns: state.verificationRuns,
+      unverifiedChanges: state.mutations > 0 && !state.verifiedSinceMutation ? 1 : 0,
+    })
+    const scores = history.get(agent) ?? []
+    const reportWithTrend = withTrend(report, scores.at(-1))
+    scores.push(report.score)
+    while (scores.length > config.historySize) scores.shift()
+    history.set(agent, scores)
+    const text = reportText(config.style, reportWithTrend)
+    if (config.reportChannel === 'console' || config.reportChannel === 'both') ctx.logger.info(text)
+    if (config.reportChannel === 'event' || config.reportChannel === 'both') {
+      ctx.emit(ctx as never, 'roast-office/report', { agent, report: reportWithTrend, text })
+    }
     states.delete(agent)
   })
 }

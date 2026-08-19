@@ -1,14 +1,36 @@
 # dsh-roast-office
 
-`dsh-roast-office` observes Agent tool results and emits deterministic behavior findings with optional roast-style feedback. It never blocks, rewrites, delays, or retries a tool call. The package is a presentation layer over existing loop facts; `dsh-repeat-tool-reminder` remains the owner of repeat-call model guidance.
+`dsh-roast-office` observes Agent tool results and emits deterministic behavior findings plus a turn-level behavior report with optional roast-style feedback. It never blocks, rewrites, delays, or retries a tool call. The package is a presentation layer over existing loop facts; `dsh-repeat-tool-reminder` remains the owner of repeat-call model guidance.
 
 This repository is an independent dsh plugin project. It targets published dsh package APIs instead of importing monorepo workspace paths.
+
+## Run the demo
+
+The demo builds the package, loads the real compiled plugin entrypoint, simulates a source mutation followed by a failed test, and prints the roast plus the structured report:
+
+```sh
+npm run build
+npm run demo
+```
+
+For a one-command run after dependencies are installed, use `npm run demo:build`.
+
+The plugin can also be mounted by a dsh Cordis composition after the package is installed and built:
+
+```yaml
+- '@dsh-plugins/roast-office':
+    style: roast
+    channels: [console]
+    reportChannel: event
+```
+
+It is observational only: it calls `next()` on the tool waterfall and returns the downstream decision unchanged.
 
 ## Config
 
 ```yaml
 - id: roast-office
-  name: '@deepseek-ai/dsh-roast-office'
+  name: '@dsh-plugins/roast-office'
   config:
     style: roast
     channels: [context, console]
@@ -16,13 +38,20 @@ This repository is an independent dsh plugin project. It targets published dsh p
     failureThreshold: 2
     maxFindingsPerTurn: 3
     cleanFinish: true
+    reportChannel: console
+    mutationTools: [write, edit, apply_patch, str_replace_editor]
+    verificationTools: [test, lint, typecheck, build, check]
+    verificationPaths: [src/**, packages/**, examples/**, scripts/**, '*.config.*', package.json, tsconfig*.json]
+    historySize: 5
 ```
 
 `style` accepts `neutral`, `gentle`, or `roast`. `context` adds a plugin-sourced notice to the next model request; `console` writes the rendered finding to the context logger. The default configuration enables both channels.
 
-The observer detects `repeat-call` when one Agent invokes the same tool with canonicalized identical arguments consecutively. It detects `failed-retry` when the same tool and failure code/message repeat consecutively. `clean-finish` is emitted to the console when an agent becomes idle after at least one call and the finding limit has not been reached.
+`reportChannel` accepts `console`, `event`, `both`, or `none`. The `event` option emits a structured `roast-office/report` event for UI, telemetry, or other plugins without requiring them to parse logger text. `mutationTools`, `verificationTools`, and `verificationPaths` accept exact names or `*` wildcards. `historySize` controls how many previous scores are retained for trend comparison.
 
-Finding facts are deterministic and contain only tool names, counts, and failure summaries needed by the rule. The roast renderer targets behavior, never the user's identity or ability. Tool results and policy decisions pass through unchanged.
+The observer detects `repeat-call` when one Agent invokes the same tool with canonicalized identical arguments consecutively. It detects `failed-retry` when the same tool and failure code/message repeat consecutively. A mutation only enters the verification window when one of its path-like arguments matches `verificationPaths`; documentation-only paths such as `README.md` are ignored by default. `clean-finish` is emitted to the console when an agent becomes idle after at least one call and includes calls, failures, repeat incidents, failure retries, unique tools, mutations, verification runs, unverified changes, score, risk, and verdict.
+
+Finding facts and reports are deterministic and contain only tool names, counts, and failure summaries needed by the rule. The report exposes stability, completeness, efficiency, and closure scores; the total is their rounded average. It also reports whether the score is `first-turn`, `improving`, `stable`, or `declining` compared with the previous report for the same Agent. Only successful verification runs clear the unverified-change state. Stability accounts for repeats, failed retries, and failure rate. Completeness accounts for unverified source changes. Efficiency tolerates two calls per distinct tool before applying a small call-volume penalty and labels the result `normal`, `watch`, or `stuck`. Closure accounts for failed calls and unverified changes. Scores from 85 are `low` risk, scores from 60 are `medium` risk, and lower scores are `high` risk. The roast renderer targets behavior, never the user's identity or ability. Tool results and policy decisions pass through unchanged.
 
 ## Model Experience
 
@@ -42,11 +71,12 @@ Notices are append-only additions after the existing tool result and do not rewr
 
 ## Extension points
 
-The exported `canonicalize` function defines argument equality for the repeat rule. `Finding` and `RuleId` are the stable vocabulary for future rule and renderer registries. A future UI consumer can subscribe to structured findings without importing a transport or UI type; the first version exposes rendered context and logger output only.
+The exported `canonicalize` function defines argument equality for the repeat rule. `buildBehaviorReport`, `BehaviorMetrics`, and `BehaviorReport` are the stable vocabulary for score consumers and future renderer registries. Consumers can subscribe to `roast-office/report` without importing a transport or UI type.
 
 ## Known Limitations and Deferred Work
 
-- The first version does not persist structured findings as a new session event.
+- Reports are emitted at the agent idle transition and are not persisted as a new session event.
 - `clean-finish` is logger-only because the status event does not carry a post-turn decision context.
 - Failure matching includes the full normalized error message, so similar failures with different dynamic text do not coalesce.
-- Search-without-progress, scope drift, and unverified-change rules remain deferred until their evidence windows are defined.
+- Trend history is held in memory and resets when the plugin is reloaded.
+- Search-without-progress and scope drift remain deferred until their evidence windows are defined.
