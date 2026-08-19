@@ -47,6 +47,7 @@ export interface BehaviorBreakdown {
 /** Deterministic turn-level behavior report. */
 export interface BehaviorReport extends BehaviorMetrics {
   readonly breakdown: BehaviorBreakdown
+  readonly efficiencyStatus: 'normal' | 'watch' | 'stuck'
   readonly score: number
   readonly risk: 'low' | 'medium' | 'high'
   readonly verdict: 'excellent' | 'review' | 'stalled'
@@ -225,17 +226,18 @@ export function buildBehaviorReport(metrics: BehaviorMetrics): BehaviorReport {
     efficiency: Math.max(0, 100 - Math.max(0, metrics.calls - metrics.uniqueTools * 2) * 5),
     closure: Math.max(0, 100 - metrics.failures * 10 - metrics.unverifiedChanges * 10),
   }
+  const efficiencyStatus = breakdown.efficiency >= 85 ? 'normal' : breakdown.efficiency >= 60 ? 'watch' : 'stuck'
   const score = Math.round((breakdown.stability + breakdown.completeness + breakdown.efficiency + breakdown.closure) / 4)
   const risk = score >= 85 ? 'low' : score >= 60 ? 'medium' : 'high'
   const verdict = score >= 85 ? 'excellent' : score >= 60 ? 'review' : 'stalled'
-  return { ...metrics, breakdown, score, risk, verdict }
+  return { ...metrics, breakdown, efficiencyStatus, score, risk, verdict }
 }
 
 function reportText(style: Style, report: BehaviorReport): string {
   const summary = `[吐槽办·clean-finish] 行为评分：${report.score}/100（${report.verdict}）\n`
     + `工具调用：${report.calls} 次；失败：${report.failures} 次；重复事件：${report.repeatIncidents} 次；失败重试：${report.failureIncidents} 次；使用工具：${report.uniqueTools} 种。\n`
     + `工作区改动：${report.mutations} 次；验证运行：${report.verificationRuns} 次；未验证改动：${report.unverifiedChanges} 次。\n`
-    + `稳定性：${report.breakdown.stability}；完整性：${report.breakdown.completeness}；效率：${report.breakdown.efficiency}；收尾：${report.breakdown.closure}。\n`
+    + `稳定性：${report.breakdown.stability}；完整性：${report.breakdown.completeness}；效率：${report.breakdown.efficiency}（${report.efficiencyStatus}）；收尾：${report.breakdown.closure}。\n`
     + `风险等级：${report.risk}。`
   if (style === 'neutral') return summary + ' 建议：检查相关测试和工作区后再提交。'
   if (style === 'gentle') return summary + ' 可以再确认一次测试和工作区状态。'

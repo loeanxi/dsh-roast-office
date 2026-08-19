@@ -46,9 +46,26 @@ describe('dsh-roast-office', () => {
         efficiency: 90,
         closure: 80,
       },
+      efficiencyStatus: 'normal',
       score: 82,
       risk: 'medium',
       verdict: 'review',
+    })
+  })
+
+  it('marks excessive calls as an efficiency watch', () => {
+    expect(RoastOffice.buildBehaviorReport({
+      calls: 10,
+      failures: 0,
+      repeatIncidents: 0,
+      failureIncidents: 0,
+      uniqueTools: 1,
+      mutations: 0,
+      verificationRuns: 0,
+      unverifiedChanges: 0,
+    })).toMatchObject({
+      breakdown: { efficiency: 60 },
+      efficiencyStatus: 'watch',
     })
   })
 
@@ -109,6 +126,7 @@ describe('dsh-roast-office', () => {
         efficiency: 100,
         closure: 100,
       },
+      efficiencyStatus: 'normal',
       score: 100,
       risk: 'low',
       verdict: 'excellent',
@@ -135,6 +153,7 @@ describe('dsh-roast-office', () => {
       breakdown: {
         completeness: 80,
       },
+      efficiencyStatus: 'normal',
       score: 93,
       risk: 'low',
       verdict: 'excellent',
@@ -162,6 +181,7 @@ describe('dsh-roast-office', () => {
       breakdown: {
         completeness: 100,
       },
+      efficiencyStatus: 'normal',
       score: 100,
       verdict: 'excellent',
     })
