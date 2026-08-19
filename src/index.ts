@@ -355,6 +355,46 @@ function stateFor(states: WeakMap<Agent, AgentState>, agent: Agent): AgentState 
   return created
 }
 
+function restoreStateFromSession(states: WeakMap<Agent, AgentState>, agent: Agent, config: Required<Config>): AgentState | undefined {
+  const session = (agent as unknown as { session?: { events?: readonly unknown[] } }).session
+  const events = session?.events
+  if (events === undefined) return states.get(agent)
+  const results = new Map<string, ToolExecutionResult>()
+  for (const event of events) {
+    if (typeof event !== 'object' || event === null || Array.isArray(event)) continue
+    const record = event as Record<string, unknown>
+    if (record.type !== 'tool/result' || typeof record.data !== 'object' || record.data === null || Array.isArray(record.data)) continue
+    const data = record.data as Record<string, unknown>
+    const message = typeof data.message === 'object' && data.message !== null && !Array.isArray(data.message) ? data.message as Record<string, unknown> : undefined
+    const source = typeof message?.source === 'object' && message.source !== null && !Array.isArray(message.source) ? message.source as Record<string, unknown> : undefined
+    const callId = source?.callId
+    if (typeof callId !== 'string') continue
+    const error = typeof data.error === 'object' && data.error !== null && !Array.isArray(data.error) ? data.error as Record<string, unknown> : undefined
+    results.set(callId, {
+      isError: error !== undefined || message?.isError === true,
+      ...(error === undefined ? {} : { error: { message: typeof error.message === 'string' ? error.message : 'tool failed', info: { code: typeof error.code === 'string' ? error.code : 'TOOL_ERROR' } } }),
+      content: Array.isArray(message?.content) ? message.content : [],
+    } as ToolExecutionResult)
+  }
+  const calls = events.filter((event): event is { type: 'tool/call'; data: { callId: string; name: string; arguments: string } } => {
+    if (typeof event !== 'object' || event === null || Array.isArray(event)) return false
+    const record = event as Record<string, unknown>
+    if (record.type !== 'tool/call' || typeof record.data !== 'object' || record.data === null || Array.isArray(record.data)) return false
+    const data = record.data as Record<string, unknown>
+    return typeof data.callId === 'string' && typeof data.name === 'string' && typeof data.arguments === 'string'
+  })
+  if (calls.length === 0) return states.get(agent)
+  const state = stateFor(states, agent)
+  for (const call of calls) {
+    const result = results.get(call.data.callId)
+    if (result === undefined) continue
+    let argumentsValue: unknown = call.data.arguments
+    try { argumentsValue = JSON.parse(call.data.arguments) } catch { /* preserve the raw model argument string */ }
+    observe({ name: call.data.name, arguments: argumentsValue, agent } as ToolExecution, result, state, config)
+  }
+  return state
+}
+
 function roast(style: Style, finding: Finding): string {
   const { ruleId, facts, recommendation } = finding
   const detail = ruleId === 'repeat-call'
