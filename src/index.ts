@@ -18,6 +18,9 @@ export type Style = 'neutral' | 'gentle' | 'roast'
 /** Output destination for a finding. */
 export type Channel = 'context' | 'console'
 
+/** Destination for the structured turn-end report. */
+export type ReportChannel = 'console' | 'event' | 'both' | 'none'
+
 /** Rules available in the plugin. */
 export type RuleId = 'repeat-call' | 'failed-retry' | 'clean-finish'
 
@@ -37,6 +40,17 @@ export interface BehaviorReport extends BehaviorMetrics {
   readonly verdict: 'excellent' | 'review' | 'stalled'
 }
 
+declare module '@deepseek-ai/cordis' {
+  interface Events {
+    /**
+     * Emitted once when the observed Agent becomes idle and reporting is enabled.
+     * @param payload - the Agent, deterministic report, and rendered text.
+     * @mode emit
+     */
+    'roast-office/report'(payload: { agent: Agent; report: BehaviorReport; text: string }): void
+  }
+}
+
 /** Plugin configuration. */
 export interface Config {
   /** Render style; defaults to `roast`. */
@@ -51,6 +65,8 @@ export interface Config {
   maxFindingsPerTurn?: number
   /** Enable the turn-end summary finding. */
   cleanFinish?: boolean
+  /** Destination for the structured turn-end report; defaults to `console`. */
+  reportChannel?: ReportChannel
 }
 
 export const Config: z<Config> = z.object({
@@ -60,6 +76,7 @@ export const Config: z<Config> = z.object({
   failureThreshold: z.number().default(2),
   maxFindingsPerTurn: z.number().default(3),
   cleanFinish: z.boolean().default(true),
+  reportChannel: z.union([z.const('console'), z.const('event'), z.const('both'), z.const('none')]).default('console'),
 })
 
 /** A stable, machine-readable observation produced by a rule. */
@@ -238,6 +255,7 @@ export function apply(ctx: Context, rawConfig: Config): void {
     failureThreshold: validatePositiveInteger(rawConfig.failureThreshold ?? 2, 'failureThreshold'),
     maxFindingsPerTurn: validatePositiveInteger(rawConfig.maxFindingsPerTurn ?? 3, 'maxFindingsPerTurn'),
     cleanFinish: rawConfig.cleanFinish ?? true,
+    reportChannel: rawConfig.reportChannel ?? 'console',
   }
   const states = new WeakMap<Agent, AgentState>()
 
@@ -269,7 +287,10 @@ export function apply(ctx: Context, rawConfig: Config): void {
       uniqueTools: state.uniqueTools.size,
     })
     const text = reportText(config.style, report)
-    if (config.channels.includes('console')) ctx.logger.info(text)
+    if (config.reportChannel === 'console' || config.reportChannel === 'both') ctx.logger.info(text)
+    if (config.reportChannel === 'event' || config.reportChannel === 'both') {
+      ctx.emit(ctx as never, 'roast-office/report', { agent, report, text })
+    }
     states.delete(agent)
   })
 }

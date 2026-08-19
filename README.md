@@ -16,9 +16,12 @@ This repository is an independent dsh plugin project. It targets published dsh p
     failureThreshold: 2
     maxFindingsPerTurn: 3
     cleanFinish: true
+    reportChannel: console
 ```
 
 `style` accepts `neutral`, `gentle`, or `roast`. `context` adds a plugin-sourced notice to the next model request; `console` writes the rendered finding to the context logger. The default configuration enables both channels.
+
+`reportChannel` accepts `console`, `event`, `both`, or `none`. The `event` option emits a structured `roast-office/report` event for UI, telemetry, or other plugins without requiring them to parse logger text.
 
 The observer detects `repeat-call` when one Agent invokes the same tool with canonicalized identical arguments consecutively. It detects `failed-retry` when the same tool and failure code/message repeat consecutively. `clean-finish` is emitted to the console when an agent becomes idle after at least one call and includes calls, failures, repeat incidents, failure retries, unique tools, score, risk, and verdict.
 
@@ -42,11 +45,11 @@ Notices are append-only additions after the existing tool result and do not rewr
 
 ## Extension points
 
-The exported `canonicalize` function defines argument equality for the repeat rule. `buildBehaviorReport`, `BehaviorMetrics`, and `BehaviorReport` are the stable vocabulary for score consumers and future renderer registries. A future UI consumer can subscribe to structured findings and reports without importing a transport or UI type; this version exposes rendered context and logger output only.
+The exported `canonicalize` function defines argument equality for the repeat rule. `buildBehaviorReport`, `BehaviorMetrics`, and `BehaviorReport` are the stable vocabulary for score consumers and future renderer registries. Consumers can subscribe to `roast-office/report` without importing a transport or UI type.
 
 ## Known Limitations and Deferred Work
 
-- The second version does not persist structured findings or reports as a new session event.
+- Reports are emitted at the agent idle transition and are not persisted as a new session event.
 - `clean-finish` is logger-only because the status event does not carry a post-turn decision context.
 - Failure matching includes the full normalized error message, so similar failures with different dynamic text do not coalesce.
 - Search-without-progress, scope drift, and unverified-change rules remain deferred until their evidence windows are defined.

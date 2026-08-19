@@ -73,4 +73,24 @@ describe('dsh-roast-office', () => {
     expect(info).toHaveBeenCalledWith(expect.stringContaining('clean-finish'))
     expect(info).toHaveBeenCalledWith(expect.stringContaining('行为评分：100/100'))
   })
+
+  it('publishes a structured report event without requiring console output', async () => {
+    const ctx = new Context()
+    const reports: RoastOffice.BehaviorReport[] = []
+    ctx.on('roast-office/report', ({ report }) => { reports.push(report) })
+    await ctx.plugin(RoastOffice, { channels: ['context'], reportChannel: 'event' })
+    const agent = {} as Agent
+    await post(ctx, execution(agent, 'read', { path: 'README.md' }), success())
+    ctx.emit(ctx as never, 'agent/status', { agent, status: 'idle' })
+    expect(reports).toEqual([{
+      calls: 1,
+      failures: 0,
+      repeatIncidents: 0,
+      failureIncidents: 0,
+      uniqueTools: 1,
+      score: 100,
+      risk: 'low',
+      verdict: 'excellent',
+    }])
+  })
 })
